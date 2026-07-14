@@ -1,0 +1,2119 @@
+#!/usr/bin/env python3
+"""
+UAV-Mini UDP console + PID tuner.
+
+ESP32 lắng nghe UDP tại <ESP32_IP>:4210.
+Script này gửi gói keepalive đầu tiên để ESP32 học peer IP:port.
+Sau đó:
+  - Nhận log/telemetry/ACK từ ESP32.
+  - Gửi lệnh arm/kill/status/help.
+  - Gửi lệnh PID dạng @PID ...
+
+Mặc định mở GUI (kéo slider hoặc gõ số để tune PID trực tiếp khi đang bay).
+Dùng --cli để quay lại console dạng gõ lệnh text như cũ.
+
+Cách dùng:
+    python tools/uav_udp_console.py                       # GUI, nhập IP trong app
+    python tools/uav_udp_console.py 192.168.1.19           # GUI, tự connect luôn
+    python tools/uav_udp_console.py 192.168.1.19 --cli     # console text (như cũ)
+    python tools/uav_udp_console.py 192.168.1.19 --debug
+
+Lệnh console text (--cli):
+    r / arm
+    k / kill / disarm
+    s / status
+    h / help
+    + / -
+    0 / stop
+
+    pid get
+    pid set rate roll 3.5 0 0.02 60 260
+
+Thoát (--cli):
+    quit
+    exit
+"""
+
+import argparse
+import queue
+import re
+import socket
+import sys
+import threading
+import time
+from collections import deque
+from typing import Callable, Optional
+
+try:
+    import tkinter as tk
+    from tkinter import messagebox, scrolledtext, ttk
+    _TK_AVAILABLE = True
+except ImportError:
+    _TK_AVAILABLE = False
+
+
+DEFAULT_PORT = 4210
+KEEPALIVE_INTERVAL_S = 5.0
+RECV_BUF_SIZE = 4096
+
+
+SHORTHAND_COMMANDS = {
+    # Vào/thoát chế độ bay-cân-bằng (bản maintenance). Bản bay không có 'f'/'q'.
+    "flight": "f", "f": "f",
+    "exit": "q", "quit": "q", "q": "q",
+
+    # ARM giờ là 'r' (trước kia 'f' vì flight-balance cũ tự arm). DISARM/kill = 'k'.
+    "arm": "r", "r": "r",
+    "kill": "k", "disarm": "k", "k": "k",
+
+    "hold": "z", "z": "z",       # ALT HOLD toggle
+    "log": "x", "x": "x",        # ALT LOG_ONLY toggle
+    "takeoff": "t", "t": "t",    # TAKEOFF tu dong len alt target
+    "land": "l", "landing": "l", "l": "l",   # LANDING tu dong ha + disarm
+
+    "status": "s", "s": "s",
+    "help": "h", "h": "h", "?": "h",
+
+    "+": "+", "throttle+": "+",
+    "-": "-", "throttle-": "-",
+    "]": "]", "[": "[",
+    ">": ">", "<": "<",
+
+    "0": "0", "stop": "0",
+}
+
+
+class UavUdpConsole:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        bind_port: "int | None" = None,
+        debug: bool = False,
+        line_callback: Optional[Callable[[str], None]] = None,
+    ):
+        self.addr = (host, port)
+        self.debug = debug
+        # When set, every received line is handed to this callback instead of
+        # being printed directly (used by the GUI to stay off the socket thread).
+        self.line_callback = line_callback
+
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        # Cho phép bind local port cố định nếu cần debug firewall/NAT.
+        # Bình thường không cần bind, Windows sẽ tự cấp source port.
+        if bind_port is not None:
+            self.sock.bind(("0.0.0.0", bind_port))
+
+        self.sock.settimeout(0.2)
+
+        self._stop = threading.Event()
+        self._rx_thread: threading.Thread | None = None
+        self._keepalive_thread: threading.Thread | None = None
+
+    def start(self):
+        # Gửi gói đầu tiên để Windows cấp local port và ESP32 học peer.
+        self._send_raw(b"\n")
+
+        print(f"[PC] local UDP socket: {self.sock.getsockname()}")
+        print(f"[PC] target ESP32     : {self.addr[0]}:{self.addr[1]}")
+
+        self._rx_thread = threading.Thread(target=self._rx_loop, daemon=True)
+        self._rx_thread.start()
+
+        self._keepalive_thread = threading.Thread(target=self._keepalive_loop, daemon=True)
+        self._keepalive_thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def _send_raw(self, data: bytes):
+        try:
+            sent = self.sock.sendto(data, self.addr)
+            if self.debug:
+                print(f"[PC -> ESP32] {sent} bytes: {data!r}")
+        except OSError as exc:
+            print(f"[send error] {exc}", file=sys.stderr)
+
+    def send_command(self, command: str):
+        # Firmware parser thường cần newline để kết thúc lệnh nhiều ký tự.
+        payload = (command + "\n").encode("utf-8")
+        self._send_raw(payload)
+
+    def _rx_loop(self):
+        while not self._stop.is_set():
+            try:
+                data, from_addr = self.sock.recvfrom(RECV_BUF_SIZE)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+            if not data:
+                continue
+
+            text = data.decode("utf-8", errors="replace")
+
+            # Có thể ESP32 gửi nhiều dòng trong một UDP packet.
+            lines = text.splitlines()
+            if not lines:
+                lines = [text]
+
+            for line in lines:
+                if self.line_callback is not None:
+                    self.line_callback(line)
+                else:
+                    print(f"{line}")
+
+    def _keepalive_loop(self):
+        while not self._stop.wait(KEEPALIVE_INTERVAL_S):
+            self._send_raw(b"\n")
+
+
+def translate_command(raw: str) -> str:
+    stripped = raw.strip()
+    lowered = stripped.lower()
+
+    if lowered in SHORTHAND_COMMANDS:
+        return SHORTHAND_COMMANDS[lowered]
+
+    # Gõ: pid get
+    # Gửi: @pid get
+    # Firmware sẽ uppercase thành @PID GET nếu code parser của m làm vậy.
+    if lowered.startswith("pid"):
+        return "@" + stripped
+
+    return stripped
+
+
+# ============================================================
+# CLI MODE (console dạng gõ lệnh text, giữ nguyên hành vi cũ)
+# ============================================================
+
+def run_cli(args):
+    console = UavUdpConsole(
+        host=args.host,
+        port=args.port,
+        bind_port=args.bind_port,
+        debug=args.debug,
+    )
+
+    console.start()
+
+    print("")
+    print(f"Đã mở UDP tới {args.host}:{args.port}.")
+    print("Gõ 'help' xem lệnh firmware, 'quit' để thoát.")
+    print("Ví dụ tune PID:")
+    print("  pid get")
+    print("  pid set rate roll 3.5 0 0.02 60 260")
+    print("")
+
+    try:
+        while True:
+            try:
+                raw = input()
+            except EOFError:
+                break
+
+            if raw.strip().lower() in ("quit", "exit"):
+                break
+
+            if not raw.strip():
+                continue
+
+            command = translate_command(raw)
+            console.send_command(command)
+
+            # Nhường chút thời gian để RX thread in ACK/log ngay sau command.
+            time.sleep(0.01)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        console.stop()
+        print("Đã ngắt kết nối.")
+
+
+# ============================================================
+# GUI MODE (kéo slider hoặc gõ số để tune PID trực tiếp)
+# ============================================================
+
+PID_LOOPS = ("ANGLE", "RATE")
+PID_AXES = ("ROLL", "PITCH", "YAW")
+PID_FIELDS = ("kp", "ki", "kd", "ilimit", "outlimit")
+# Chỉ hiện kp/ki/kd trên UI cho gọn; ilimit/outlimit vẫn được firmware yêu cầu (7
+# token) nên GUI giữ ngầm (lấy từ @PID GET) rồi gửi kèm khi SET — xem GainGroup.
+PID_VISIBLE_FIELDS = ("kp", "ki", "kd")
+
+FIELD_RANGE = {
+    "kp": (0.0, 20.0),
+    "ki": (0.0, 10.0),
+    "kd": (0.0, 5.0),
+    "ilimit": (0.0, 1000.0),
+    "outlimit": (0.0, 1000.0),
+}
+
+# Matches both the "PID GET" dump lines and "PID OK ..." set-confirmations:
+#   PID ANGLE ROLL 0.1000 0.0000 0.0000 30.0000 30.0000
+#   PID OK RATE PITCH 3.5000 0.0000 0.0200 60.0000 260.0000
+PID_DUMP_RE = re.compile(
+    r"^PID (?:OK )?(ANGLE|RATE) (ROLL|PITCH|YAW) "
+    r"([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+)\s*$"
+)
+PID_ERR_RE = re.compile(r"^PID ERR (.*)$")
+
+# ARM=1 THR=200 | R=0.12 P=-0.34 Y=1.20 | G=0.10 0.20 0.30 | valid=1 | ACC=1.002 ACCU=1
+# ACC = |accel| in g (1.0 = pure gravity); ACCU = 0 means the EKF gated this
+# sample out (vibration / non-gravity accel) and skipped the tilt correction.
+# Dùng để phân biệt "pitch tăng that vi rung dong co" voi "pitch tang vi
+# khung/prop mat can bang" khi tang throttle.
+STATUS_RE = re.compile(
+    r"^ARM=(\d) THR=(-?\d+) \| R=([-\d.]+) P=([-\d.]+) Y=([-\d.]+) \| "
+    r"G=([-\d.]+) ([-\d.]+) ([-\d.]+) \| "
+    # Cụm accel từng trục "A=ax ay az |" và duty 4 động cơ "M = m1 m2 m3 m4 |".
+    # Đều non-capturing để KHÔNG dịch chỉ số group phía sau (A do ACC_PLOT_RE bắt
+    # riêng cho đồ thị; M chỉ hiện trong log text).
+    r"(?:A=[-\d.]+ [-\d.]+ [-\d.]+ \| )?"
+    r"(?:M\s*=\s*-?\d+ -?\d+ -?\d+ -?\d+ \| )?"
+    r"(?:valid|Val)=(\d)"          # firmware cũ 'valid=', mới 'Val='
+    r"(?: \| ACC=([-\d.]+) ACCU=(\d))?"
+    r"(?: \| YAWREL=([-\d.]+))?"
+    # Cụm altitude của BẢN BAY (flight_control 3 tầng), append vào cuối dòng STATUS.
+    # Optional để dòng STATUS cũ (không có altitude) vẫn khớp.
+    r"(?: \| ALTm=([-\d.]+) VZ=([-\d.]+) TGT=([-\d.]+) MODE=(\d) AV=(\d) "
+    r"TOF=([-\d.]+) TOK=(\d) TERR=(\d+)(?: TKO=(\d))?(?: KI=(\d))?(?: LAND=(\d))?)?\s*$"
+    # TKO=pha takeoff, KI=I-term đang dùng, LAND=pha landing
+)
+
+# Lightweight extractor JUST for the live plot: pulls R/P/Y + the three gyro
+# values out of ANY line that contains them, via re.search (not anchored). This
+# matches both the flight build's STATUS line (ARM=... | R=.. | G=.. | valid=..)
+# and the maintenance build's live-EKF line (R=.. P=.. Y=.. | G=.. | ACC=.. ...),
+# so the chart works regardless of which firmware/mode is running.
+# Y is optional: the maintenance flight-balance line prints "R=.. P=.. | G=.."
+# (no yaw), while the live-Mahony and flight STATUS lines include "Y=..".
+PLOT_RE = re.compile(
+    r"R=([-\d.]+) P=([-\d.]+)(?: Y=([-\d.]+))? \| "
+    r"G=([-\d.]+) ([-\d.]+) ([-\d.]+)"
+)
+
+# Cụm độ cao trong dòng STATUS (re.search, không anchored): lấy ALTm (estimator),
+# TGT (target) và TOF (mẫu thô) cho đồ thị Altitude.
+ALT_PLOT_RE = re.compile(
+    r"ALTm=([-\d.]+) VZ=[-\d.]+ TGT=([-\d.]+) MODE=\d AV=\d TOF=([-\d.]+)"
+)
+
+# Cụm accel từng trục "| A=ax ay az |" (body-frame, đơn vị g, ĐÃ qua LPF) cho đồ
+# thị Accel. "| A=" đủ đặc trưng để không dính "ACC=" hay "ARM=".
+ACC_PLOT_RE = re.compile(
+    r"\| A=([-\d.]+) ([-\d.]+) ([-\d.]+) \|"
+)
+
+# Duty 4 motor "M = m1 m2 m3 m4" -> hiện trên nhãn telemetry (đồ thị cột 3 giờ là
+# altitude). \s* khớp cả "M=" lẫn "M = ". re.search.
+MOTOR_RE = re.compile(
+    r"M\s*=\s*(-?\d+) (-?\d+) (-?\d+) (-?\d+)"
+)
+
+# Mahony filter gains reply: "MAH KP=.. KI=.." (from @MAH GET) or
+# "MAH OK KP=.. KI=.." (from @MAH SET).
+MAH_RE = re.compile(r"^MAH (?:OK )?KP=([-\d.]+) KI=([-\d.]+)")
+
+# Pilot setpoint reply: "SP R=.. P=.. Y=.." (from @SP GET) or
+# "SP OK R=.. P=.. Y=.." (from @SP SET). Y is the yaw-RATE target (dps).
+SP_RE = re.compile(r"^SP (?:OK )?R=([-\d.]+) P=([-\d.]+) Y=([-\d.]+)")
+
+# Trim reply: "TRIM roll=.. pitch=.." (GET) / "TRIM SET OK roll=.. pitch=.." (SET).
+TRIM_RE = re.compile(r"^TRIM (?:SET OK )?roll=([-\d.]+) pitch=([-\d.]+)")
+
+# Altitude controller @ALT reply (hover đã tách sang @TKO):
+#   "ALT kp=.. vzkp=.. vzki=.. vzilim=.. tgt=.. mode=.."   (GET)
+#   "ALT SET OK kp=.. vzkp=.. vzki=.. vzilim=.."           (SET)
+FLIGHT_ALT_RE = re.compile(
+    r"^ALT (?:SET OK )?kp=([-\d.]+) vzkp=([-\d.]+) vzki=([-\d.]+) "
+    r"vzilim=([-\d.]+)(?: tgt=([-\d.]+) mode=(\d))?"
+)
+
+# Ground/takeoff @TKO reply:
+#   "TKO hover=.. spool=.. ms=.. timeout=.. liftoff=.."        (GET)
+#   "TKO SET OK hover=.. spool=.. ms=.. timeout=.. liftoff=.." (SET)
+TKO_RE = re.compile(
+    r"^TKO (?:SET OK )?hover=([-\d.]+) spool=([-\d.]+) ms=([-\d.]+) "
+    r"timeout=([-\d.]+) liftoff=([-\d.]+)"
+)
+
+# Landing @LAND reply:
+#   "LAND dvz=.. flarealt=.. fvz=.. tdalt=.."        (GET)
+#   "LAND SET OK dvz=.. flarealt=.. fvz=.. tdalt=.." (SET)
+LAND_RE = re.compile(
+    r"^LAND (?:SET OK )?dvz=([-\d.]+) flarealt=([-\d.]+) fvz=([-\d.]+) tdalt=([-\d.]+)"
+)
+
+# ============================================================
+# LIVE PLOT (Serial-Plotter style, pure-Tkinter Canvas)
+# ============================================================
+# Each channel maps to a field parsed out of the STATUS line. Colours are
+# chosen to stay readable on the default (light) Tk background.
+#   key -> (legend label, line colour)
+# Angles and gyro live on separate plots (very different magnitudes), each
+# with its own auto-scaled Y axis.
+PLOT_ANGLE_CHANNELS = (
+    ("roll",  "Roll (deg)",   "#d81b60"),
+    ("pitch", "Pitch (deg)",  "#1e88e5"),
+    ("yaw",   "Yaw (deg)",    "#8e24aa"),
+)
+
+PLOT_GYRO_CHANNELS = (
+    ("gx", "Gyro X (dps)", "#e65100"),
+    ("gy", "Gyro Y (dps)", "#2e7d32"),
+    ("gz", "Gyro Z (dps)", "#00838f"),
+)
+
+# Accel body-frame (g), ĐÃ qua LPF — đứng yên phải thấy ax,ay ~ 0 và az ~ 1.0;
+# rung motor lộ ra ở biên độ răng cưa của cả 3 đường.
+PLOT_ACC_CHANNELS = (
+    ("ax", "Acc X (g)", "#d81b60"),
+    ("ay", "Acc Y (g)", "#1e88e5"),
+    ("az", "Acc Z (g)", "#6d4c41"),
+)
+# Độ cao (mét, cùng thang): estimator vs ToF thô vs target — soi chất lượng
+# TẦNG 2 (alt bám tof, dead-reckon khi mất) và độ bám target khi HOLD/TAKEOFF.
+PLOT_ALT_CHANNELS = (
+    ("alt", "Alt est (m)", "#1e88e5"),
+    ("tof", "ToF raw (m)", "#e65100"),
+    ("tgt", "Target (m)",  "#2e7d32"),
+)
+# How many samples to keep on screen. STATUS arrives ~10 Hz, so 600 points is
+# ~60 s of history.
+PLOT_MAX_POINTS = 600
+
+
+class PlotPanel:
+    """Scrolling multi-line strip chart drawn on a Tk Canvas.
+
+    Mimics the Arduino IDE Serial Plotter: newest sample on the right, the
+    Y axis auto-scales to whatever channels are currently enabled. One panel
+    holds one group of channels (e.g. the three angles, or the three gyro
+    rates) so each gets its own Y scale. Per-channel checkboxes toggle lines.
+    """
+
+    def __init__(self, parent, channels, title,
+                 max_points=PLOT_MAX_POINTS, redraw_ms=50):
+        self.channels = channels
+        self.max_points = max_points
+        self.redraw_ms = redraw_ms
+        self.paused = False
+
+        self.buffers = {key: deque(maxlen=max_points) for key, _, _ in channels}
+        self.enabled = {key: tk.BooleanVar(value=True) for key, _, _ in channels}
+        self.latest = {key: None for key, _, _ in channels}
+
+        self.frame = ttk.LabelFrame(parent, text=title)
+
+        # --- control row: per-channel checkboxes + pause/clear ---
+        controls = ttk.Frame(self.frame)
+        controls.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(2, 0))
+
+        for key, label, colour in channels:
+            # tk.Checkbutton (not ttk) so the check text can be coloured to
+            # match its line, like a plot legend.
+            cb = tk.Checkbutton(
+                controls,
+                text=label,
+                variable=self.enabled[key],
+                fg=colour,
+                activeforeground=colour,
+                selectcolor="",
+            )
+            cb.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.pause_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            controls, text="Pause", variable=self.pause_var,
+            command=self._on_pause,
+        ).pack(side=tk.LEFT, padx=(12, 6))
+
+        ttk.Button(controls, text="Clear", command=self.clear).pack(side=tk.LEFT)
+
+        self.readout_var = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=self.readout_var, foreground="gray").pack(
+            side=tk.RIGHT, padx=(6, 0)
+        )
+
+        # --- the canvas itself ---
+        self.canvas = tk.Canvas(
+            self.frame, height=150, background="#fafafa", highlightthickness=1,
+            highlightbackground="#cccccc",
+        )
+        self.canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self._redraw()
+
+    def _on_pause(self):
+        self.paused = self.pause_var.get()
+
+    def clear(self):
+        for buf in self.buffers.values():
+            buf.clear()
+
+    def push(self, values: dict):
+        """Append one sample. `values` maps channel key -> float."""
+        if self.paused:
+            return
+        for key, _, _ in self.channels:
+            v = values.get(key)
+            if v is None:
+                continue
+            self.buffers[key].append(v)
+            self.latest[key] = v
+
+    def _redraw(self):
+        c = self.canvas
+        c.delete("all")
+
+        w = c.winfo_width()
+        h = c.winfo_height()
+
+        if w < 4 or h < 4:
+            self.canvas.after(self.redraw_ms, self._redraw)
+            return
+
+        pad_l, pad_r, pad_t, pad_b = 46, 8, 8, 6
+        plot_w = w - pad_l - pad_r
+        plot_h = h - pad_t - pad_b
+
+        active = [
+            key for key, _, _ in self.channels
+            if self.enabled[key].get() and len(self.buffers[key]) > 0
+        ]
+
+        # Empty state: make it obvious the panel is alive but has no data yet,
+        # instead of a blank rectangle that looks "broken".
+        if not active:
+            c.create_rectangle(pad_l, pad_t, pad_l + plot_w, pad_t + plot_h,
+                               outline="#cccccc")
+            c.create_text(
+                pad_l + plot_w / 2, pad_t + plot_h / 2,
+                text="Cho du lieu tu ESP (connect + co dong R=.. P=.. Y=.. | G=..)",
+                fill="#999999",
+            )
+            self.canvas.after(self.redraw_ms, self._redraw)
+            return
+
+        # Y range across enabled channels only.
+        y_min = None
+        y_max = None
+        for key in active:
+            b = self.buffers[key]
+            lo = min(b)
+            hi = max(b)
+            y_min = lo if y_min is None else min(y_min, lo)
+            y_max = hi if y_max is None else max(y_max, hi)
+
+        if y_min is None or y_max is None:
+            y_min, y_max = -1.0, 1.0
+        if y_max - y_min < 1e-6:
+            y_min -= 1.0
+            y_max += 1.0
+
+        span = y_max - y_min
+        y_min -= 0.08 * span
+        y_max += 0.08 * span
+        span = y_max - y_min
+
+        def to_x(i, n):
+            # Newest sample (i = n-1) pinned to the right edge; each sample a
+            # fixed pixel step so the trace scrolls right-to-left at constant
+            # density regardless of how full the buffer is.
+            step = plot_w / (self.max_points - 1)
+            return pad_l + plot_w - (n - 1 - i) * step
+
+        def to_y(v):
+            return pad_t + (y_max - v) / span * plot_h
+
+        # Plot border.
+        c.create_rectangle(pad_l, pad_t, pad_l + plot_w, pad_t + plot_h,
+                           outline="#cccccc")
+
+        # Horizontal gridlines + Y labels: top, bottom, and 0 if in range.
+        for gy in (y_max, (y_max + y_min) * 0.5, y_min):
+            yy = to_y(gy)
+            c.create_line(pad_l, yy, pad_l + plot_w, yy, fill="#eeeeee")
+            c.create_text(pad_l - 4, yy, text=f"{gy:.0f}", anchor="e",
+                         fill="#888888", font=("TkDefaultFont", 7))
+
+        if y_min < 0.0 < y_max:
+            y0 = to_y(0.0)
+            c.create_line(pad_l, y0, pad_l + plot_w, y0, fill="#bbbbbb")
+
+        # One polyline per enabled channel.
+        for key, _, colour in self.channels:
+            if not self.enabled[key].get():
+                continue
+            b = self.buffers[key]
+            n = len(b)
+            if n < 2:
+                continue
+            coords = []
+            for i, v in enumerate(b):
+                coords.append(to_x(i, n))
+                coords.append(to_y(v))
+            c.create_line(*coords, fill=colour, width=1)
+
+        # Latest-value readout (legend-style, updated in place).
+        parts = []
+        for key, label, _ in self.channels:
+            if self.enabled[key].get() and self.latest[key] is not None:
+                short = label.split(" ")[0]
+                parts.append(f"{short}={self.latest[key]:.1f}")
+        self.readout_var.set("  ".join(parts))
+
+        self.canvas.after(self.redraw_ms, self._redraw)
+
+
+class GainRow:
+    """One kp/ki/kd/ilimit/outlimit slider + editable value box."""
+
+    def __init__(self, parent, row, label, value_range, on_apply,
+                 slider_len=150, label_width=9):
+        self.on_apply = on_apply
+        self._suppress = False
+
+        ttk.Label(parent, text=label, width=label_width, anchor="e").grid(
+            row=row, column=0, padx=(4, 2), pady=1, sticky="e"
+        )
+
+        self.var = tk.DoubleVar(value=0.0)
+        lo, hi = value_range
+        self.scale = ttk.Scale(
+            parent, from_=lo, to=hi, orient=tk.HORIZONTAL, length=slider_len,
+            variable=self.var, command=self._on_scale_move,
+        )
+        self.scale.grid(row=row, column=1, padx=2, pady=1, sticky="ew")
+        # Only actually send the new gain when the drag is released, not on
+        # every intermediate tick: PID SET resets the integrator each time.
+        self.scale.bind("<ButtonRelease-1>", self._on_scale_release)
+
+        self.entry_var = tk.StringVar(value="0.0000")
+        self.entry = ttk.Entry(parent, textvariable=self.entry_var, width=9)
+        self.entry.grid(row=row, column=2, padx=(2, 4), pady=1)
+        self.entry.bind("<Return>", self._on_entry_commit)
+        self.entry.bind("<FocusOut>", self._on_entry_commit)
+
+    def _on_scale_move(self, _value):
+        if self._suppress:
+            return
+        self.entry_var.set(f"{self.var.get():.4f}")
+
+    def _on_scale_release(self, _event):
+        if self._suppress:
+            return
+        self.on_apply()
+
+    def _on_entry_commit(self, _event):
+        if self._suppress:
+            return
+
+        try:
+            value = float(self.entry_var.get())
+        except ValueError:
+            self.entry_var.set(f"{self.var.get():.4f}")
+            return
+
+        self._suppress = True
+        try:
+            self.entry_var.set(f"{value:.4f}")
+            lo, hi = float(self.scale["from"]), float(self.scale["to"])
+            self.var.set(min(max(value, lo), hi))
+        finally:
+            self._suppress = False
+
+        self.on_apply()
+
+    def set_value(self, value: float):
+        self._suppress = True
+        try:
+            self.var.set(value)
+            self.entry_var.set(f"{value:.4f}")
+        finally:
+            self._suppress = False
+
+    def get_value(self) -> float:
+        try:
+            return float(self.entry_var.get())
+        except ValueError:
+            return self.var.get()
+
+
+class GainGroup:
+    """One loop/axis pair (e.g. ANGLE ROLL): chỉ hiện kp/ki/kd cho gọn.
+
+    ilimit/outlimit KHÔNG hiện trên UI nhưng firmware @PID SET vẫn cần đủ 7 token,
+    nên giữ ngầm (self._ilim/_olim), cập nhật từ @PID GET, gửi kèm khi SET. Mặc định
+    khởi điểm > 0 để lỡ SET trước khi GET về cũng không kẹp output = 0.
+    """
+
+    def __init__(self, parent, loop, axis, send_pid_set):
+        self.loop = loop
+        self.axis = axis
+        self.send_pid_set = send_pid_set
+        self._ilim = 60.0    # ngầm; @PID GET sẽ ghi đè đúng giá trị firmware
+        self._olim = 150.0
+
+        self.frame = ttk.LabelFrame(parent, text=f"{loop} {axis}")
+        self.rows = {
+            field: GainRow(self.frame, i, field, FIELD_RANGE[field], self._apply)
+            for i, field in enumerate(PID_VISIBLE_FIELDS)
+        }
+
+        btn_row = len(PID_VISIBLE_FIELDS)
+        ttk.Button(self.frame, text="Set now", command=self._apply).grid(
+            row=btn_row, column=0, columnspan=2, pady=(4, 2), sticky="ew"
+        )
+
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(self.frame, textvariable=self.status_var, foreground="gray")
+        self.status_label.grid(row=btn_row, column=2, pady=(4, 2), sticky="w")
+
+    def _apply(self):
+        values = {field: self.rows[field].get_value() for field in PID_VISIBLE_FIELDS}
+        values["ilimit"] = self._ilim      # ngầm, kèm theo cho đủ token firmware
+        values["outlimit"] = self._olim
+        self.send_pid_set(self.loop, self.axis, values)
+        self.status_var.set("sending...")
+        self.status_label.configure(foreground="gray")
+
+    def set_values(self, kp, ki, kd, ilim, olim):
+        self.rows["kp"].set_value(kp)
+        self.rows["ki"].set_value(ki)
+        self.rows["kd"].set_value(kd)
+        self._ilim = ilim                  # lưu ngầm (không hiện UI)
+        self._olim = olim
+
+    def mark_ok(self):
+        self.status_var.set("OK")
+        self.status_label.configure(foreground="green")
+
+    def mark_err(self, msg):
+        self.status_var.set(f"ERR: {msg}")
+        self.status_label.configure(foreground="red")
+
+
+class FlightAltGroup:
+    """Altitude controller 3 tầng: alt_kp / vz_kp / vz_ki / vz_ilimit + target + mode.
+
+    hover/spool/takeoff/landing đã TÁCH sang panel riêng. Gửi @ALT SET/TGT/MODE;
+    live đọc từ cụm ALTm/VZ/... của STATUS.
+    """
+
+    FIELDS = ("kp", "vzkp", "vzki", "vzilim", "tgt")
+
+    def __init__(self, parent, on_set, on_get, on_mode, on_tgt_step):
+        self.frame = ttk.LabelFrame(parent, text="ALT controller (flight)")
+
+        self.rows = {
+            "kp":     GainRow(self.frame, 0, "alt_kp",  (0.0, 10.0),   on_set, slider_len=110, label_width=7),
+            "vzkp":   GainRow(self.frame, 1, "vz_kp",   (0.0, 1000.0), on_set, slider_len=110, label_width=7),
+            "vzki":   GainRow(self.frame, 2, "vz_ki",   (0.0, 1000.0), on_set, slider_len=110, label_width=7),
+            "vzilim": GainRow(self.frame, 3, "vz_ilim", (0.0, 1000.0), on_set, slider_len=110, label_width=7),
+            "tgt":    GainRow(self.frame, 4, "tgt(m)",  (0.0, 2.0),    on_set, slider_len=110, label_width=7),
+        }
+
+        self.live_var = tk.StringVar(value="ALT: -- m | vz -- | mode -- | tof -- | av -")
+        ttk.Label(self.frame, textvariable=self.live_var, foreground="#0057b3").grid(
+            row=5, column=0, columnspan=3, sticky="w", padx=4, pady=(2, 0))
+
+        btns = ttk.Frame(self.frame)
+        btns.grid(row=6, column=0, columnspan=3, sticky="w", padx=2, pady=(2, 0))
+        ttk.Button(btns, text="Get", width=4, command=on_get).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btns, text="Set", width=4, command=on_set).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btns, text="HOLD", width=5, command=lambda: on_mode(2)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btns, text="LOG", width=4, command=lambda: on_mode(1)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btns, text="OFF", width=4, command=lambda: on_mode(0)).pack(side=tk.LEFT, padx=1)
+
+        btns2 = ttk.Frame(self.frame)
+        btns2.grid(row=7, column=0, columnspan=3, sticky="w", padx=2)
+        ttk.Button(btns2, text="Tgt +10cm", command=lambda: on_tgt_step(1)).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btns2, text="Tgt -10cm", command=lambda: on_tgt_step(-1)).pack(side=tk.LEFT, padx=1)
+
+        self.status_var = tk.StringVar(value="")
+        self.status_label = ttk.Label(self.frame, textvariable=self.status_var, foreground="gray")
+        self.status_label.grid(row=8, column=0, columnspan=3, sticky="w", padx=4)
+
+    def get_values(self):
+        return {f: self.rows[f].get_value() for f in self.FIELDS}
+
+    def set_gains(self, kp, vzkp, vzki, vzilim, tgt=None):
+        self.rows["kp"].set_value(kp)
+        self.rows["vzkp"].set_value(vzkp)
+        self.rows["vzki"].set_value(vzki)
+        self.rows["vzilim"].set_value(vzilim)
+        if tgt is not None:
+            self.rows["tgt"].set_value(tgt)
+
+    def set_live(self, alt_m, vz, tgt, mode, tof, av, terr):
+        names = {0: "OFF", 1: "LOG", 2: "HOLD", 3: "TAKEOFF"}
+        self.live_var.set(
+            f"ALT: {alt_m:.2f} m | vz {vz:+.2f} | tgt {tgt:.2f} | "
+            f"mode {names.get(mode, mode)} | tof {tof:.2f} | av {av} | terr {terr}")
+
+    def mark_ok(self):
+        self.status_var.set("OK")
+        self.status_label.configure(foreground="green")
+
+
+class TakeoffGroup:
+    """Thông số ground/takeoff (@TKO): hover, spool_duty, spool_ms, timeout_ms,
+    liftoff_m. Takeoff giữ target user, chỉ đưa drone rời đất rồi giao HOLD. SET/GET."""
+
+    FIELDS = ("hover", "spool", "ms", "timeout", "liftoff")
+
+    def __init__(self, parent, on_set, on_get, on_takeoff):
+        self.frame = ttk.LabelFrame(parent, text="Takeoff / Ground (@TKO)")
+        SL, LW = 100, 8
+        specs = [
+            ("hover",   "hover",      (0.0, 1000.0)),
+            ("spool",   "spool_duty", (0.0, 1000.0)),
+            ("ms",      "spool_ms",   (1.0, 3000.0)),
+            ("timeout", "timeout_ms", (200.0, 10000.0)),
+            ("liftoff", "liftoff_m",  (0.05, 2.0)),
+        ]
+        self.rows = {key: GainRow(self.frame, i, lbl, rng, on_set,
+                                  slider_len=SL, label_width=LW)
+                     for i, (key, lbl, rng) in enumerate(specs)}
+        r = len(specs)
+        ttk.Label(self.frame, text="giu target user; roi dat (>liftoff) -> HOLD",
+                  foreground="gray").grid(row=r, column=0, columnspan=3, sticky="w", padx=4)
+
+        btns = ttk.Frame(self.frame)
+        btns.grid(row=r + 1, column=0, columnspan=3, sticky="w", padx=2, pady=(2, 0))
+        ttk.Button(btns, text="Get", width=4, command=on_get).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btns, text="Set", width=4, command=on_set).pack(side=tk.LEFT, padx=1)
+        self.takeoff_btn = tk.Button(
+            btns, text="TAKEOFF (t)", command=on_takeoff,
+            bg="#0a7d2c", fg="white", activebackground="#0c9235",
+            font=("Segoe UI", 9, "bold"))
+        self.takeoff_btn.pack(side=tk.LEFT, padx=(6, 1))
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self.frame, textvariable=self.status_var, foreground="gray").grid(
+            row=r + 2, column=0, columnspan=3, sticky="w", padx=4)
+
+    def get_values(self):
+        return {f: self.rows[f].get_value() for f in self.FIELDS}
+
+    def set_values(self, hover, spool, ms, timeout, liftoff):
+        self.rows["hover"].set_value(hover)
+        self.rows["spool"].set_value(spool)
+        self.rows["ms"].set_value(ms)
+        self.rows["timeout"].set_value(timeout)
+        self.rows["liftoff"].set_value(liftoff)
+
+    def mark_ok(self):
+        self.status_var.set("OK")
+
+
+class LandingGroup:
+    """Thông số hạ cánh (@LAND): descent_vz, flare_alt, flare_vz, touchdown_alt.
+    + nút LAND kích hạ tự động. Gửi @LAND SET/GET, @LAND (bare) để kích."""
+
+    FIELDS = ("dvz", "flarealt", "fvz", "tdalt")
+
+    def __init__(self, parent, on_set, on_get, on_land):
+        self.frame = ttk.LabelFrame(parent, text="Landing (@LAND)")
+        self.rows = {
+            "dvz":      GainRow(self.frame, 0, "descent_vz", (0.05, 1.0), on_set, slider_len=110, label_width=9),
+            "flarealt": GainRow(self.frame, 1, "flare_alt",  (0.05, 1.0), on_set, slider_len=110, label_width=9),
+            "fvz":      GainRow(self.frame, 2, "flare_vz",   (0.02, 0.5), on_set, slider_len=110, label_width=9),
+            "tdalt":    GainRow(self.frame, 3, "td_alt",     (0.02, 0.5), on_set, slider_len=110, label_width=9),
+        }
+        ttk.Label(self.frame, text="hạ vz cố định -> flare -> chạm đất -> disarm",
+                  foreground="gray").grid(row=4, column=0, columnspan=3, sticky="w", padx=4)
+
+        btns = ttk.Frame(self.frame)
+        btns.grid(row=5, column=0, columnspan=3, sticky="w", padx=2, pady=(2, 0))
+        ttk.Button(btns, text="Get", width=5, command=on_get).pack(side=tk.LEFT, padx=1)
+        ttk.Button(btns, text="Set", width=5, command=on_set).pack(side=tk.LEFT, padx=1)
+        self.land_btn = tk.Button(
+            btns, text="LAND (l)", command=on_land,
+            bg="#b5651d", fg="white", activebackground="#c9761f",
+            font=("Segoe UI", 9, "bold"))
+        self.land_btn.pack(side=tk.LEFT, padx=(6, 1))
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(self.frame, textvariable=self.status_var, foreground="gray").grid(
+            row=6, column=0, columnspan=3, sticky="w", padx=4)
+
+    def get_values(self):
+        return {f: self.rows[f].get_value() for f in self.FIELDS}
+
+    def set_values(self, dvz, flarealt, fvz, tdalt):
+        self.rows["dvz"].set_value(dvz)
+        self.rows["flarealt"].set_value(flarealt)
+        self.rows["fvz"].set_value(fvz)
+        self.rows["tdalt"].set_value(tdalt)
+
+    def mark_ok(self):
+        self.status_var.set("OK")
+
+
+class PidTunerApp:
+    def __init__(self, root, host, port, bind_port, debug):
+        self.root = root
+        self.root.title("UAV-Mini PID Tuner")
+
+        self.console: Optional[UavUdpConsole] = None
+        self.line_queue: "queue.Queue[str]" = queue.Queue()
+
+        self.host = host
+        self.port = port
+        self.bind_port = bind_port
+        self.debug = debug
+
+        self.groups: dict[tuple[str, str], GainGroup] = {}
+
+        # ---- Manual control state (tab "Manual Control") ----
+        # cmd_roll/pitch/yaw = LỆNH bay (firmware cộng lên trim). alt dùng >/< (step
+        # cố định firmware). Chỉ tác dụng khi tab Manual đang chọn.
+        self.cmd_roll = 0.0
+        self.cmd_pitch = 0.0
+        self.cmd_yaw = 0.0
+        self._held = set()             # token hướng đang giữ: roll+/roll-/pitch±/yaw±
+        self._keys_down = set()        # keysym đang giữ (chống auto-repeat Windows)
+        self._release_after = {}       # keysym -> after id (chống auto-repeat X11)
+        self._ws_repeat_after = None   # timer auto-repeat W/S (alt)
+        self._ws_repeat_key = None
+        self._hb_after = None          # heartbeat @SP
+        self._last_sent_sp = None      # BUG 2: (r,p,y) đã gửi lần cuối (dedup)
+        self._last_sp_time = 0.0       # BUG 2: thời điểm gửi cuối (keepalive 1Hz)
+        self._last_key_event = 0.0     # BUG 4: timestamp key event cuối (watchdog kẹt phím)
+        self._kw_after = None          # BUG 4: timer watchdog kẹt phím
+        # ---- Auto-brake (chỉ roll/pitch) ----
+        # Nhả phím -> nghiêng NGƯỢC một nhịp ngắn để phanh quán tính, rồi về 0.
+        # Mỗi trục có timer + giá trị phanh riêng (độc lập). Tk vars (spinbox +
+        # checkbox) tạo trong _build_manual_tab.
+        self._hold_start = {}                          # name hướng -> timestamp nhấn
+        self._brake_after = {"roll": None, "pitch": None}  # timer kết thúc phanh
+        self._brake_cmd = {"roll": 0.0, "pitch": 0.0}      # góc phanh đang áp (override)
+        self._brake_secs = {"roll": 0.0, "pitch": 0.0}     # thời lượng phanh (hiển thị)
+        self._manual_btns = {}         # tên -> nút (để highlight active)
+        self._manual_tab_id = None     # id tab Manual trong notebook
+        self._last_alt_target = None   # TGT= từ telemetry (hiện trên tab Manual)
+        # nút hướng -> token; phím -> nút hướng.
+        # Quy ước dấu (khớp firmware): tiến=pitch âm, lùi=pitch dương;
+        # phải=roll âm, trái=roll dương; quay trái=yaw giảm, quay phải=yaw tăng.
+        self._dir_token = {"up": "pitch-", "down": "pitch+", "left": "roll+",
+                           "right": "roll-", "yaw_l": "yaw-", "yaw_r": "yaw+"}
+        self.KEY_TO_DIR = {"up": "up", "down": "down", "left": "left",
+                           "right": "right", "a": "yaw_l", "d": "yaw_r"}
+
+        self._build_ui()
+        self.root.after(50, self._poll_queue)
+        self.root.after(200, self._key_watchdog)   # BUG 4: watchdog kẹt phím
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Kill switch always reachable, regardless of focused widget.
+        self.root.bind("<Escape>", lambda _e: self.send_kill())
+
+        if self.host:
+            self.root.after(200, self.connect)
+
+    # ---------------- UI construction ----------------
+
+    def _build_ui(self):
+        top = ttk.Frame(self.root, padding=6)
+        top.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(top, text="ESP32 IP:").pack(side=tk.LEFT)
+        self.host_var = tk.StringVar(value=self.host or "")
+        ttk.Entry(top, textvariable=self.host_var, width=16).pack(side=tk.LEFT, padx=(2, 8))
+
+        ttk.Label(top, text="Port:").pack(side=tk.LEFT)
+        self.port_var = tk.StringVar(value=str(self.port))
+        ttk.Entry(top, textvariable=self.port_var, width=6).pack(side=tk.LEFT, padx=(2, 8))
+
+        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connect)
+        self.connect_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.conn_status_var = tk.StringVar(value="Disconnected")
+        self.conn_status_label = ttk.Label(top, textvariable=self.conn_status_var, foreground="red")
+        self.conn_status_label.pack(side=tk.LEFT)
+
+        warn = ttk.Label(
+            self.root,
+            text="CANH BAO: kiem tra gain truoc khi bay, KILL luon san sang (nut do / phim Esc).",
+            foreground="#b35c00",
+            padding=(6, 0),
+        )
+        warn.pack(side=tk.TOP, fill=tk.X)
+
+        flight = ttk.Frame(self.root, padding=6)
+        flight.pack(side=tk.TOP, fill=tk.X)
+
+        # ---- Mode + arm (khớp phím firmware) ----
+        # Maintenance: 'f' vào flight-balance RTOS (disarmed) -> 'r' ARM -> 'q' thoat.
+        # Bản bay: 'r'/'k' arm/kill luon san (khong co 'f'/'q').
+        ttk.Button(flight, text="Flight (f)", command=lambda: self.send_raw_cmd("f")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="ARM (r)", command=self.send_arm).pack(side=tk.LEFT, padx=2)
+
+        kill_btn = tk.Button(
+            flight, text="KILL (k)", command=self.send_kill,
+            bg="red", fg="white", activebackground="#a00000", activeforeground="white",
+        )
+        kill_btn.pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="Exit (q)", command=lambda: self.send_raw_cmd("q")).pack(side=tk.LEFT, padx=(2, 8))
+
+        # ---- Throttle (+/-=±20, ]/[=±5, 0=cắt) ----
+        ttk.Button(flight, text="Thr +20", command=lambda: self.send_raw_cmd("+")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="Thr +5",  command=lambda: self.send_raw_cmd("]")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="Thr -5",  command=lambda: self.send_raw_cmd("[")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="Thr -20", command=lambda: self.send_raw_cmd("-")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="Thr 0",   command=lambda: self.send_raw_cmd("0")).pack(side=tk.LEFT, padx=(2, 8))
+
+        # ---- Altitude 3 tầng (z=HOLD, x=LOG, >/<=target ±10cm) ----
+        ttk.Button(flight, text="HOLD (z)", command=lambda: self.send_raw_cmd("z")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="LOG (x)",  command=lambda: self.send_raw_cmd("x")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="Alt +",    command=lambda: self.send_raw_cmd(">")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="Alt -",    command=lambda: self.send_raw_cmd("<")).pack(side=tk.LEFT, padx=(2, 8))
+
+        ttk.Button(flight, text="Status (e)", command=lambda: self.send_raw_cmd("e")).pack(side=tk.LEFT, padx=2)
+        ttk.Button(flight, text="GET ALL PID", command=self.get_all_pid).pack(side=tk.LEFT, padx=(8, 2))
+
+        self.telemetry_var = tk.StringVar(value="ARM=? THR=? | R=? P=? Y=? | valid=?")
+        ttk.Label(flight, textvariable=self.telemetry_var, foreground="#0057b3").pack(side=tk.LEFT, padx=(16, 0))
+
+        # ===== NOTEBOOK: Tab Config (toàn bộ tuning + log) | Tab Manual Control =====
+        # Thanh nút trên (flight) + 4 đồ thị (dựng sau) NẰM NGOÀI notebook -> luôn hiện.
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        config_tab = ttk.Frame(self.notebook)
+        self.notebook.add(config_tab, text="Config")
+        manual_tab = ttk.Frame(self.notebook)
+        self.notebook.add(manual_tab, text="Manual Control")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+        # ===== Config tab: tuning bên TRÁI | Log bên PHẢI (không đổi gì) =====
+        mid = ttk.Frame(config_tab, padding=6)
+        mid.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(mid)
+        left.pack(side=tk.LEFT, fill=tk.Y, expand=False)
+
+        # Bố cục lưới 3×3 (cột = ROLL/PITCH/YAW):
+        #   Hàng 0: ANGLE ROLL   ANGLE PITCH   ANGLE YAW
+        #   Hàng 1: RATE ROLL    RATE PITCH    RATE YAW
+        #   Hàng 2: ALT CONTROLLER  TAKEOFF    LANDING
+        # sticky="new": top-align, không giãn dọc. Panel cao (ALT/TKO/LAND) nằm HÀNG
+        # CUỐI nên không đẩy hàng PID -> RATE luôn sát ngay dưới ANGLE.
+        groups_frame = ttk.Frame(left)
+        groups_frame.pack(side=tk.TOP, anchor="w")
+        for c in range(3):
+            groups_frame.columnconfigure(c, uniform="setcols")
+
+        # Hàng 0-1: PID cascade (ANGLE/RATE × ROLL/PITCH/YAW) — có cả ANGLE YAW.
+        for col, axis in enumerate(PID_AXES):
+            for row, loop in enumerate(PID_LOOPS):
+                g = GainGroup(groups_frame, loop, axis, self.send_pid_set)
+                g.frame.grid(row=row, column=col, padx=4, pady=4, sticky="new")
+                self.groups[(loop, axis)] = g
+
+        # Hàng 2: ALT controller | Takeoff | Landing.
+        self.flight_alt = FlightAltGroup(
+            groups_frame,
+            self.send_flight_alt_set,
+            self.get_flight_alt,
+            self.send_flight_alt_mode,
+            lambda d: self.send_raw_cmd(">" if d > 0 else "<"),
+        )
+        self.flight_alt.frame.grid(row=2, column=0, padx=4, pady=4, sticky="new")
+
+        self.tko = TakeoffGroup(groups_frame, self.send_flight_tko_set,
+                                self.get_flight_tko, self.send_flight_takeoff)
+        self.tko.frame.grid(row=2, column=1, padx=4, pady=4, sticky="new")
+
+        self.land = LandingGroup(groups_frame, self.send_flight_land_set,
+                                 self.get_flight_land, self.send_flight_landing)
+        self.land.frame.grid(row=2, column=2, padx=4, pady=4, sticky="new")
+
+        # Mahony filter + angle target, dưới lưới PID (vẫn thuộc cột TRÁI).
+        self._build_mahony_panel(left)
+
+        # ===== Log (bên PHẢI) — GIÃN theo cửa sổ =====
+        # log_frame + log_text đều fill=BOTH expand=True để khi phóng to cửa sổ thì
+        # log rộng/cao ra theo. width=48/height=36 chỉ là cỡ KHỞI ĐẦU (tối thiểu);
+        # khu tuning (left) fill=Y expand=False nên không giãn ngang -> log ăn hết dư.
+        log_frame = ttk.Frame(mid)
+        log_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(8, 0))
+        ttk.Label(log_frame, text="Log:").pack(side=tk.TOP, anchor="w")
+        self.log_text = scrolledtext.ScrolledText(log_frame, width=48, height=36,
+                                                  state="disabled", wrap="none")
+        self.log_text.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # ===== Tab Manual Control (mới) =====
+        self._build_manual_tab(manual_tab)
+
+        # ===== 4 đồ thị NGOÀI notebook (luôn hiện) — dựng SAU cùng =====
+        self._build_plots()
+
+        # Bind phím điều khiển tay + watchdog an toàn (chỉ tác dụng khi ở tab Manual).
+        self._bind_manual_keys()
+
+    def _build_mahony_panel(self, parent):
+        # 3 cột gọn: Mahony (Kp/Ki) | Angle target (R/P/Y) | Trim (roll/pitch).
+        frame = ttk.Frame(parent)
+        frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 6))
+        SL = 90   # slider ngắn cho gọn
+
+        # Cột 0: Mahony filter gain.
+        ff = ttk.LabelFrame(frame, text="Mahony")
+        ff.pack(side=tk.LEFT, anchor="n", padx=(2, 4))
+        self.mah_kp = GainRow(ff, 0, "Kp", (0.0, 5.0), self.send_mahony_set,
+                              slider_len=SL, label_width=4)
+        self.mah_ki = GainRow(ff, 1, "Ki", (0.0, 2.0), self.send_mahony_set,
+                              slider_len=SL, label_width=4)
+        mbf = ttk.Frame(ff)
+        mbf.grid(row=2, column=0, columnspan=3, sticky="ew", padx=4, pady=(2, 2))
+        ttk.Button(mbf, text="Set", command=self.send_mahony_set).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(mbf, text="Get", command=self.get_mahony).pack(side=tk.LEFT, padx=(4, 0))
+        self.mah_status_var = tk.StringVar(value="")
+        ttk.Label(ff, textvariable=self.mah_status_var, foreground="gray").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=4)
+
+        # Cột 1: Angle target (deg).
+        tf = ttk.LabelFrame(frame, text="Angle target (deg)")
+        tf.pack(side=tk.LEFT, anchor="n", padx=4)
+        self.target_roll = GainRow(tf, 0, "Roll", (-30.0, 30.0), self.send_target_set,
+                                   slider_len=SL, label_width=5)
+        self.target_pitch = GainRow(tf, 1, "Pitch", (-30.0, 30.0), self.send_target_set,
+                                    slider_len=SL, label_width=5)
+        self.target_yaw = GainRow(tf, 2, "Yaw", (-180.0, 180.0), self.send_target_set,
+                                  slider_len=SL, label_width=5)
+        tbf = ttk.Frame(tf)
+        tbf.grid(row=3, column=0, columnspan=3, sticky="ew", padx=4, pady=(2, 2))
+        ttk.Button(tbf, text="Set", command=self.send_target_set).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(tbf, text="0", command=self.zero_target, width=3).pack(side=tk.LEFT, padx=(4, 0))
+        self.target_status_var = tk.StringVar(value="")
+        ttk.Label(tf, textvariable=self.target_status_var, foreground="gray").grid(
+            row=4, column=0, columnspan=3, sticky="w", padx=4)
+
+        # Cột 2: TRIM roll/pitch (@TRIM) — bù lệch cơ khí/CG để hover thẳng.
+        trf = ttk.LabelFrame(frame, text="Trim (deg) @TRIM")
+        trf.pack(side=tk.LEFT, anchor="n", padx=(4, 2))
+        self.trim_roll = GainRow(trf, 0, "roll", (-10.0, 10.0), self.send_flight_trim_set,
+                                 slider_len=SL, label_width=5)
+        self.trim_pitch = GainRow(trf, 1, "pitch", (-10.0, 10.0), self.send_flight_trim_set,
+                                  slider_len=SL, label_width=5)
+        trbf = ttk.Frame(trf)
+        trbf.grid(row=2, column=0, columnspan=3, sticky="ew", padx=4, pady=(2, 2))
+        ttk.Button(trbf, text="Set", command=self.send_flight_trim_set).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(trbf, text="Get", command=self.get_flight_trim).pack(side=tk.LEFT, padx=(4, 0))
+        self.trim_status_var = tk.StringVar(value="")
+        ttk.Label(trf, textvariable=self.trim_status_var, foreground="gray").grid(
+            row=3, column=0, columnspan=3, sticky="w", padx=4)
+
+    def _build_plots(self):
+        # 4 đồ thị live (angle / gyro / accel / altitude) — parent = self.root nên
+        # NẰM NGOÀI notebook, luôn hiển thị bất kể đang ở tab Config hay Manual,
+        # dữ liệu KHÔNG reset khi đổi tab (cùng object PlotPanel).
+        plots = ttk.Frame(self.root)
+        plots.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=6, pady=(0, 4))
+        plots.rowconfigure(0, weight=1)
+        plots.columnconfigure(0, weight=1, uniform="plots")
+        plots.columnconfigure(1, weight=1, uniform="plots")
+        plots.columnconfigure(2, weight=1, uniform="plots")
+        plots.columnconfigure(3, weight=1, uniform="plots")
+
+        # Symmetric padx (1px) để khe hở nằm GIỮA các đồ thị, không làm cái nào hẹp hơn.
+        self.plot_angle = PlotPanel(plots, PLOT_ANGLE_CHANNELS, "Angle (deg)")
+        self.plot_angle.frame.grid(row=0, column=0, sticky="nsew", padx=(0, 1))
+
+        self.plot_gyro = PlotPanel(plots, PLOT_GYRO_CHANNELS, "Gyro rate (dps)")
+        self.plot_gyro.frame.grid(row=0, column=1, sticky="nsew", padx=(1, 1))
+
+        self.plot_acc = PlotPanel(plots, PLOT_ACC_CHANNELS, "Accel (g)")
+        self.plot_acc.frame.grid(row=0, column=2, sticky="nsew", padx=(1, 1))
+
+        self.plot_alt = PlotPanel(plots, PLOT_ALT_CHANNELS, "Altitude (m)")
+        self.plot_alt.frame.grid(row=0, column=3, sticky="nsew", padx=(1, 0))
+
+    # ---------------- Manual Control tab ----------------
+
+    def _build_manual_tab(self, parent):
+        self._manual_tab_id = str(parent)
+        outer = ttk.Frame(parent, padding=10)
+        outer.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            outer,
+            text=("CANH BAO: Nha phim = VE THANG BANG, KHONG phai dung lai. "
+                  "Nhan phim NGUOC de phanh. Drone khong co cam bien ngang -> se TROI."),
+            fg="#a00000", font=("Segoe UI", 10, "bold"),
+            wraplength=1000, justify="left").pack(side=tk.TOP, anchor="w", pady=(0, 8))
+
+        self.manual_status_var = tk.StringVar(value="ARM=?  mode=?  alt=?m")
+        ttk.Label(outer, textvariable=self.manual_status_var, foreground="#0057b3",
+                  font=("Segoe UI", 11, "bold")).pack(side=tk.TOP, anchor="w")
+        self.manual_cmd_var = tk.StringVar()
+        ttk.Label(outer, textvariable=self.manual_cmd_var,
+                  font=("Consolas", 11)).pack(side=tk.TOP, anchor="w")
+        self.manual_brake_var = tk.StringVar(value="")
+        ttk.Label(outer, textvariable=self.manual_brake_var,
+                  font=("Segoe UI", 11, "bold"), foreground="#c0007a").pack(
+                      side=tk.TOP, anchor="w")
+        self._update_manual_cmd_label()
+        # Throttle từng động cơ (M1..M4) từ telemetry.
+        self.manual_motor_var = tk.StringVar(value="M1=--  M2=--  M3=--  M4=--")
+        ttk.Label(outer, textvariable=self.manual_motor_var,
+                  font=("Consolas", 11), foreground="#7a3d00").pack(
+                      side=tk.TOP, anchor="w", pady=(0, 10))
+
+        steps = ttk.LabelFrame(outer, text="Steps")
+        steps.pack(side=tk.TOP, anchor="w", pady=(0, 10))
+        self.tilt_step_var = tk.DoubleVar(value=4.0)
+        self.yaw_step_var = tk.DoubleVar(value=30.0)
+        ttk.Label(steps, text="TILT (deg):").grid(row=0, column=0, padx=4, pady=3, sticky="e")
+        tk.Spinbox(steps, from_=1.0, to=10.0, increment=0.5, width=6,
+                   textvariable=self.tilt_step_var).grid(row=0, column=1, padx=(0, 14))
+        ttk.Label(steps, text="YAW rate (deg/s):").grid(row=0, column=2, padx=4, pady=3, sticky="e")
+        tk.Spinbox(steps, from_=10.0, to=90.0, increment=5.0, width=6,
+                   textvariable=self.yaw_step_var).grid(row=0, column=3, padx=(0, 14))
+        ttk.Label(steps, text="(ALT step co dinh 10cm)", foreground="gray").grid(row=0, column=4, padx=4)
+
+        # ---- Auto-brake (roll/pitch): nhả phím -> nghiêng ngược 1 nhịp để phanh ----
+        brakef = ttk.LabelFrame(outer, text="Auto-brake (roll/pitch)")
+        brakef.pack(side=tk.TOP, anchor="w", pady=(0, 10))
+        self._autobrake_var = tk.BooleanVar(value=True)
+        self.brake_k_var = tk.DoubleVar(value=0.6)
+        self.brake_ratio_var = tk.DoubleVar(value=0.7)
+        self.brake_min_var = tk.DoubleVar(value=0.10)
+        self.brake_max_var = tk.DoubleVar(value=1.00)
+        ttk.Checkbutton(brakef, text="Auto-brake", variable=self._autobrake_var).grid(
+            row=0, column=0, padx=4, pady=3, sticky="w")
+
+        def _brake_sb(col, label, var, lo, hi, inc):
+            ttk.Label(brakef, text=label).grid(row=0, column=col, padx=(12, 2),
+                                               pady=3, sticky="e")
+            tk.Spinbox(brakef, from_=lo, to=hi, increment=inc, width=6,
+                       textvariable=var).grid(row=0, column=col + 1, padx=(0, 4))
+
+        # K: brake_time = K*hold_time (trôi tiếp->tăng K, lùi ngược->giảm K)
+        _brake_sb(1, "K:", self.brake_k_var, 0.0, 3.0, 0.1)
+        # ratio: góc phanh = ratio*TILT_STEP (nhỏ hơn cho đỡ giật)
+        _brake_sb(3, "ratio:", self.brake_ratio_var, 0.0, 1.0, 0.05)
+        _brake_sb(5, "min(s):", self.brake_min_var, 0.02, 2.0, 0.02)
+        _brake_sb(7, "max(s):", self.brake_max_var, 0.1, 3.0, 0.1)
+
+        pad = ttk.Frame(outer)
+        pad.pack(side=tk.TOP, anchor="w")
+
+        yawf = ttk.LabelFrame(pad, text="Yaw (A/D) - giu = xoay, nha = dung")
+        yawf.grid(row=0, column=0, padx=6, pady=4, sticky="n")
+        self._mk_dir_btn(yawf, "yaw_l", "A\n<xoay").grid(row=0, column=0, padx=2, pady=2)
+        self._mk_dir_btn(yawf, "yaw_r", "D\nxoay>").grid(row=0, column=1, padx=2, pady=2)
+
+        rpf = ttk.LabelFrame(pad, text="Roll/Pitch (mui ten) - giu = nghieng, nha = ve 0")
+        rpf.grid(row=0, column=1, padx=6, pady=4, sticky="n")
+        self._mk_dir_btn(rpf, "up",    "^\ntien").grid(row=0, column=1, padx=2, pady=2)
+        self._mk_dir_btn(rpf, "left",  "<\ntrai").grid(row=1, column=0, padx=2, pady=2)
+        self._mk_dir_btn(rpf, "down",  "v\nlui").grid(row=1, column=1, padx=2, pady=2)
+        self._mk_dir_btn(rpf, "right", ">\nphai").grid(row=1, column=2, padx=2, pady=2)
+
+        altf = ttk.LabelFrame(pad, text="Alt (W/S) - click tung nac, GIU gia tri")
+        altf.grid(row=0, column=2, padx=6, pady=4, sticky="n")
+        b_w = tk.Button(altf, text="W\nlen +10cm", width=10, height=3,
+                        command=lambda: self._alt_step(+1))
+        b_w.grid(row=0, column=0, padx=2, pady=2)
+        b_s = tk.Button(altf, text="S\nxuong -10cm", width=10, height=3,
+                        command=lambda: self._alt_step(-1))
+        b_s.grid(row=1, column=0, padx=2, pady=2)
+
+        tlf = ttk.LabelFrame(pad, text="Takeoff / Land")
+        tlf.grid(row=0, column=3, padx=6, pady=4, sticky="n")
+        self.manual_takeoff_btn = tk.Button(
+            tlf, text="TAKEOFF (T)", width=12, height=2,
+            bg="#0a7d2c", fg="white", activebackground="#0c9235",
+            font=("Segoe UI", 9, "bold"), command=self.send_flight_takeoff)
+        self.manual_takeoff_btn.grid(row=0, column=0, padx=2, pady=2)
+        tk.Button(tlf, text="LAND (L)", width=12, height=2,
+                  bg="#b5651d", fg="white", activebackground="#c9761f",
+                  font=("Segoe UI", 9, "bold"),
+                  command=self.send_flight_landing).grid(row=1, column=0, padx=2, pady=2)
+
+        tk.Button(outer,
+                  text="PANIC / LEVEL (Space)  -  ve thang bang, giu do cao (KHONG cat motor)",
+                  bg="#f0a000", fg="black", activebackground="#ffb51a",
+                  font=("Segoe UI", 11, "bold"),
+                  command=self._panic_level).pack(side=tk.TOP, anchor="w", fill=tk.X, pady=(12, 4))
+
+        ttk.Label(outer, foreground="gray",
+                  text="Meo: neu vua go spinbox thi click vao vung nay de GUI bat lai phim. "
+                       "KILL (Esc / nut do) luon san sang.").pack(side=tk.TOP, anchor="w")
+
+        # Focus sink: nhận focus để phím không bị spinbox nuốt; click nền -> lấy focus về.
+        self._focus_sink_w = tk.Frame(outer, width=1, height=1, takefocus=1)
+        self._focus_sink_w.pack(side=tk.TOP)
+        for w in (outer, pad):
+            w.bind("<Button-1>", lambda _e: self._focus_sink())
+
+    def _mk_dir_btn(self, parent, name, text):
+        b = tk.Button(parent, text=text, width=8, height=3)
+        b._def_bg = b.cget("background")
+        b.bind("<ButtonPress-1>", lambda _e, n=name: self._dir_press(n, True))
+        b.bind("<ButtonRelease-1>", lambda _e, n=name: self._dir_press(n, False))
+        self._manual_btns[name] = b
+        return b
+
+    # ---- momentary roll/pitch/yaw ----
+    def _dir_press(self, name, active):
+        token = self._dir_token[name]
+        axis = token[:-1]            # "roll" / "pitch" / "yaw"
+        if active:
+            # QUY TẮC 1: bất kỳ phím hướng nào được NHẤN -> hủy MỌI phanh đang chạy,
+            # người lái luôn thắng, xử lý lệnh mới ngay. Ghi mốc giữ để tính brake.
+            self._cancel_all_brakes()
+            self._hold_start[name] = time.time()
+            self._held.add(token)
+        else:
+            self._held.discard(token)
+            # Auto-brake CHỈ cho roll/pitch (KHÔNG yaw). Bỏ qua nếu tắt, hoặc trục
+            # vẫn còn phím giữ (lệnh giữ thắng phanh).
+            if (axis in ("roll", "pitch") and self._autobrake_on()
+                    and not self._axis_held(axis)):
+                self._start_brake(name, token, axis)
+        self._highlight(name, active)
+        self._recompute_cmd()
+        self._send_sp()
+        self._update_brake_label()
+
+    def _recompute_cmd(self):
+        tilt = self._get_step(self.tilt_step_var, 4.0)
+        yaw = self._get_step(self.yaw_step_var, 30.0)
+        h = self._held
+        roll_held = (tilt if "roll+" in h else 0.0) - (tilt if "roll-" in h else 0.0)
+        pitch_held = (tilt if "pitch+" in h else 0.0) - (tilt if "pitch-" in h else 0.0)
+        # Phím GIỮ thắng phanh; khi không giữ mà đang phanh -> dùng góc phanh (ngược).
+        self.cmd_roll = roll_held if roll_held != 0.0 else self._brake_cmd["roll"]
+        self.cmd_pitch = pitch_held if pitch_held != 0.0 else self._brake_cmd["pitch"]
+        self.cmd_yaw = (yaw if "yaw+" in h else 0.0) - (yaw if "yaw-" in h else 0.0)
+
+    # ---- auto-brake helpers ----
+    def _autobrake_on(self):
+        try:
+            return bool(self._autobrake_var.get())
+        except Exception:
+            return True
+
+    def _axis_held(self, axis):
+        return (axis + "+") in self._held or (axis + "-") in self._held
+
+    def _start_brake(self, name, token, axis):
+        # brake_time = clamp(K*hold_time, min, max). Nghiêng NGƯỢC hướng vừa nhả,
+        # độ lớn = ratio*TILT_STEP. Kết thúc bằng after() (không sleep -> không block).
+        hold_time = time.time() - self._hold_start.get(name, time.time())
+        k = self._get_step(self.brake_k_var, 0.6)
+        ratio = self._get_step(self.brake_ratio_var, 0.7)
+        bmin = self._get_step(self.brake_min_var, 0.10)
+        bmax = self._get_step(self.brake_max_var, 1.00)
+        brake_time = min(max(k * hold_time, bmin), bmax)
+        tilt = self._get_step(self.tilt_step_var, 4.0)
+        sign = 1.0 if token.endswith("+") else -1.0
+        self._brake_cmd[axis] = -sign * tilt * ratio     # ngược dấu hướng vừa nhả
+        self._brake_secs[axis] = brake_time
+        self._brake_after[axis] = self.root.after(
+            int(brake_time * 1000), lambda a=axis: self._end_brake(a))
+
+    def _end_brake(self, axis):
+        self._brake_after[axis] = None
+        self._brake_cmd[axis] = 0.0
+        self._recompute_cmd()
+        self._send_sp()
+        self._update_brake_label()
+
+    def _cancel_brake(self, axis):
+        if self._brake_after[axis] is not None:
+            self.root.after_cancel(self._brake_after[axis])
+            self._brake_after[axis] = None
+        self._brake_cmd[axis] = 0.0
+
+    def _cancel_all_brakes(self):
+        for ax in ("roll", "pitch"):
+            self._cancel_brake(ax)
+
+    def _update_brake_label(self):
+        if not hasattr(self, "manual_brake_var"):
+            return
+        parts = [f"{ax} ({self._brake_secs[ax]:.2f}s)"
+                 for ax in ("roll", "pitch") if self._brake_after[ax] is not None]
+        self.manual_brake_var.set(("BRAKING " + ", ".join(parts)) if parts else "")
+
+    def _get_step(self, var, default):
+        try:
+            return float(var.get())
+        except Exception:
+            return default
+
+    def _highlight(self, name, active):
+        b = self._manual_btns.get(name)
+        if b is not None:
+            b.configure(bg="#7ec8ff" if active else b._def_bg)
+
+    def _send_sp(self):
+        # Gửi NGAY khi cmd đổi (nhấn/nhả phím) VÀ ghi lại tracker để heartbeat
+        # 100ms sau không gửi lại cùng giá trị (BUG 2: chống double-send).
+        if self.console is not None:
+            cur = (self.cmd_roll, self.cmd_pitch, self.cmd_yaw)
+            self.console.send_command(f"@SP SET {cur[0]:.2f} {cur[1]:.2f} {cur[2]:.2f}")
+            self._last_sent_sp = cur
+            self._last_sp_time = time.time()
+        self._update_manual_cmd_label()
+
+    def _update_manual_cmd_label(self):
+        if not hasattr(self, "manual_cmd_var"):
+            return
+        tgt = "--" if self._last_alt_target is None else f"{self._last_alt_target}m"
+        self.manual_cmd_var.set(
+            f"cmd_roll={self.cmd_roll:+.1f}  cmd_pitch={self.cmd_pitch:+.1f}  "
+            f"cmd_yaw_rate={self.cmd_yaw:+.1f}   |   alt_target={tgt}")
+
+    # ---- alt (W/S) — step cố định firmware ('>'/'<') ----
+    def _alt_step(self, sign):
+        self.send_raw_cmd(">" if sign > 0 else "<")
+
+    def _start_ws_repeat(self, sign):
+        self._stop_ws_repeat()
+        self._ws_repeat_key = sign
+        self._alt_step(sign)
+        self._ws_repeat_after = self.root.after(400, self._ws_tick)
+
+    def _ws_tick(self):
+        if self._ws_repeat_key is None:
+            return
+        self._alt_step(self._ws_repeat_key)
+        self._ws_repeat_after = self.root.after(333, self._ws_tick)   # ~3 lần/giây
+
+    def _stop_ws_repeat(self):
+        if self._ws_repeat_after is not None:
+            self.root.after_cancel(self._ws_repeat_after)
+            self._ws_repeat_after = None
+        self._ws_repeat_key = None
+
+    # ---- an toàn ----
+    def _zero_cmd(self, send=False):
+        self._held.clear()
+        # BUG 1: phải xóa CẢ _keys_down và _release_after, nếu không sau panic/
+        # focus-out/đổi-tab thì keysym còn kẹt trong _keys_down -> _on_manual_keypress
+        # RETURN sớm -> phím chết giữa lúc bay tới khi có KeyRelease thật.
+        self._keys_down.clear()
+        for aid in self._release_after.values():
+            self.root.after_cancel(aid)
+        self._release_after.clear()
+        # QUY TẮC 2/3: Space (panic) / mất focus / đổi tab -> hủy MỌI phanh đang chạy.
+        self._cancel_all_brakes()
+        self.cmd_roll = self.cmd_pitch = self.cmd_yaw = 0.0
+        for name in self._manual_btns:
+            self._highlight(name, False)
+        self._stop_ws_repeat()
+        if send:
+            self._send_sp()
+        else:
+            self._update_manual_cmd_label()
+        self._update_brake_label()
+
+    def _panic_level(self):
+        # Space: về thăng bằng, giữ độ cao. KHÁC KILL (không cắt motor).
+        self._zero_cmd(send=True)
+
+    def _focus_sink(self):
+        try:
+            self._focus_sink_w.focus_set()
+        except Exception:
+            pass
+
+    def _start_heartbeat(self):
+        self._stop_heartbeat()
+        self._heartbeat()
+
+    def _heartbeat(self):
+        # BUG 2: chỉ gửi khi GIÁ TRỊ ĐỔI, cộng keepalive chậm 1Hz phòng rớt gói.
+        # Trước đây gửi 10Hz vô điều kiện -> ESP32 parse 10 lệnh/giây vô ích + ACK
+        # ngược -> nghẽn 2 chiều. Timer vẫn quay 100ms để bắt kịp thay đổi tức thì.
+        if self.console is not None:
+            cur = (self.cmd_roll, self.cmd_pitch, self.cmd_yaw)
+            now = time.time()
+            changed = (cur != self._last_sent_sp)
+            stale = (now - self._last_sp_time) > 1.0        # keepalive 1Hz
+            if changed or stale:
+                self.console.send_command(f"@SP SET {cur[0]:.2f} {cur[1]:.2f} {cur[2]:.2f}")
+                self._last_sent_sp = cur
+                self._last_sp_time = now
+        self._hb_after = self.root.after(100, self._heartbeat)
+
+    def _stop_heartbeat(self):
+        if self._hb_after is not None:
+            self.root.after_cancel(self._hb_after)
+            self._hb_after = None
+
+    def _key_watchdog(self):
+        # BUG 4: lớp phòng thủ THỨ HAI cho focus check (vốn không tin cậy). Nếu
+        # đang giữ phím BÀN PHÍM (_keys_down khác rỗng) mà >0.6s KHÔNG có key event
+        # nào -> KeyRelease đã mất (alt-tab / focus bị cướp) -> coi như kẹt phím ->
+        # về thăng bằng. Giữ phím thật thì auto-repeat liên tục refresh
+        # _last_key_event nên watchdog KHÔNG kích oan. Dùng _keys_down (không phải
+        # _held) để KHÔNG đụng trường hợp giữ CHUỘT trên nút hướng (không sinh key
+        # event nhưng ButtonRelease luôn tới -> không thể kẹt).
+        if (self._manual_active() and self._keys_down
+                and (time.time() - self._last_key_event) > 0.6):
+            self._zero_cmd(send=True)
+            self._log("[GUI] watchdog: mat KeyRelease -> ve thang bang (ket phim)")
+        self._kw_after = self.root.after(200, self._key_watchdog)
+
+    def _manual_active(self):
+        try:
+            return self.notebook.select() == self._manual_tab_id
+        except Exception:
+            return False
+
+    def _on_tab_changed(self, _e=None):
+        if self._manual_active():
+            self._zero_cmd(send=True)     # vào Manual: bắt đầu ở thăng bằng
+            self._focus_sink()
+            self._start_heartbeat()
+        else:
+            self._zero_cmd(send=True)     # rời Manual: về thăng bằng
+            self._stop_heartbeat()
+
+    def _on_focus_out(self, _e=None):
+        # Cửa sổ mất focus (alt-tab / click app khác) trong lúc giữ phím -> release
+        # có thể không tới -> cmd kẹt. Về thăng bằng NGAY.
+        if self._manual_active() and not self.root.focus_displayof():
+            self._zero_cmd(send=True)
+
+    def _on_unmap(self, e):
+        if e.widget is self.root and self._manual_active():
+            self._zero_cmd(send=True)
+
+    # ---- key handling ----
+    def _bind_manual_keys(self):
+        keys = ("Up", "Down", "Left", "Right", "a", "A", "d", "D",
+                "w", "W", "s", "S")
+        for ks in keys:
+            self.root.bind(f"<KeyPress-{ks}>", self._on_manual_keypress, add="+")
+            self.root.bind(f"<KeyRelease-{ks}>", self._on_manual_keyrelease, add="+")
+        for ks in ("space", "t", "T", "l", "L"):
+            self.root.bind(f"<KeyPress-{ks}>", self._on_manual_keypress, add="+")
+        self.root.bind("<FocusOut>", self._on_focus_out, add="+")
+        self.root.bind("<Unmap>", self._on_unmap, add="+")
+
+    def _focus_is_entry(self):
+        w = self.root.focus_get()
+        return isinstance(w, (tk.Entry, ttk.Entry, tk.Spinbox))
+
+    def _on_manual_keypress(self, e):
+        if not self._manual_active():
+            return
+        ks = e.keysym.lower()
+        self._last_key_event = time.time()   # BUG 4: refresh cả khi auto-repeat
+        if self._focus_is_entry():
+            return   # đang gõ spinbox -> không điều khiển drone
+        if ks in self._release_after:                 # auto-repeat X11: hủy release chờ
+            self.root.after_cancel(self._release_after.pop(ks))
+            return
+        if ks in self._keys_down:                     # auto-repeat Windows
+            return
+        self._keys_down.add(ks)
+        self._key_press_action(ks)
+
+    def _on_manual_keyrelease(self, e):
+        if not self._manual_active():
+            return
+        ks = e.keysym.lower()
+        self._last_key_event = time.time()   # BUG 4
+        if ks in self._release_after:
+            return
+        self._release_after[ks] = self.root.after_idle(
+            lambda k=ks: self._confirm_release(k))
+
+    def _confirm_release(self, ks):
+        self._release_after.pop(ks, None)
+        if ks in self._keys_down:
+            self._keys_down.discard(ks)
+            self._key_release_action(ks)
+
+    def _key_press_action(self, ks):
+        if ks in self.KEY_TO_DIR:
+            self._dir_press(self.KEY_TO_DIR[ks], True)
+        elif ks == "w":
+            self._start_ws_repeat(+1)
+        elif ks == "s":
+            self._start_ws_repeat(-1)
+        elif ks == "space":
+            self._panic_level()
+        elif ks == "t":
+            self.send_flight_takeoff()
+        elif ks == "l":
+            self.send_flight_landing()
+
+    def _key_release_action(self, ks):
+        if ks in self.KEY_TO_DIR:
+            self._dir_press(self.KEY_TO_DIR[ks], False)
+        elif ks in ("w", "s"):
+            self._stop_ws_repeat()
+
+    # ---------------- connection ----------------
+
+    def toggle_connect(self):
+        if self.console is None:
+            self.connect()
+        else:
+            self.disconnect()
+
+    def connect(self):
+        host = self.host_var.get().strip()
+        if not host:
+            self._log("[GUI] Nhap IP ESP32 truoc.")
+            return
+
+        try:
+            port = int(self.port_var.get().strip())
+        except ValueError:
+            self._log("[GUI] Port khong hop le.")
+            return
+
+        self.console = UavUdpConsole(
+            host=host, port=port, bind_port=self.bind_port, debug=self.debug,
+            line_callback=self._on_line_from_rx_thread,
+        )
+        self.console.start()
+
+        self.conn_status_var.set(f"Connected -> {host}:{port}")
+        self.conn_status_label.configure(foreground="green")
+        self.connect_btn.configure(text="Disconnect")
+        self._log(f"[GUI] Da mo UDP toi {host}:{port}")
+
+        self.root.after(300, self.get_all_pid)
+        self.root.after(400, self.get_mahony)
+        self.root.after(500, self.get_setpoint)
+        self.root.after(550, self.get_flight_trim)
+        self.root.after(600, self.get_flight_alt)
+        self.root.after(700, self.get_flight_tko)
+        self.root.after(800, self.get_flight_land)
+
+    def disconnect(self):
+        if self.console is not None:
+            self.console.stop()
+            self.console = None
+
+        self.conn_status_var.set("Disconnected")
+        self.conn_status_label.configure(foreground="red")
+        self.connect_btn.configure(text="Connect")
+        self._log("[GUI] Da ngat ket noi.")
+
+    def _on_close(self):
+        self.disconnect()
+        self.root.destroy()
+
+    # ---------------- sending ----------------
+
+    def send_raw_cmd(self, cmd: str):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi.")
+            return
+        self.console.send_command(translate_command(cmd))
+
+    def send_arm(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi.")
+            return
+
+        # ARM ('r'): cho phep stabilizer cam lai dong co. Bam trong flight-balance
+        # (sau khi da vao bang 'f') hoac o ban bay. Xac nhan vi dong co se quay khi
+        # tang throttle. (Muon VAO flight-balance thi bam nut "Flight (f)" truoc.)
+        confirmed = messagebox.askyesno(
+            "ARM",
+            "Dong co se san sang quay (self-level roll/pitch, yaw-rate).\n"
+            "Da thao canh quat / co dinh khung chua?\n\n"
+            "Xac nhan ARM (r)?",
+        )
+        if not confirmed:
+            self._log("[GUI] Da huy ARM.")
+            return
+
+        self.send_raw_cmd("r")
+
+    def send_kill(self):
+        # KILL ('k') = disarm ngay -> stabilizer cat dong co, van o trong mode de
+        # co the re-arm. Muon roi han flight-balance thi bam "Exit (q)".
+        self.send_raw_cmd("k")
+
+    def get_all_pid(self):
+        if self.console is None:
+            return
+        self.console.send_command("@PID GET")
+
+    def send_pid_set(self, loop, axis, values):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the set PID.")
+            return
+
+        cmd = (
+            f"@PID SET {loop} {axis} "
+            f"{values['kp']:.4f} {values['ki']:.4f} {values['kd']:.4f} "
+            f"{values['ilimit']:.4f} {values['outlimit']:.4f}"
+        )
+        self.console.send_command(cmd)
+
+    def send_mahony_set(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the set Mahony.")
+            return
+        kp = self.mah_kp.get_value()
+        ki = self.mah_ki.get_value()
+        self.console.send_command(f"@MAH SET {kp:.4f} {ki:.4f}")
+        self.mah_status_var.set("sending...")
+
+    def get_mahony(self):
+        if self.console is None:
+            return
+        self.console.send_command("@MAH GET")
+
+    def get_setpoint(self):
+        if self.console is None:
+            return
+        self.console.send_command("@SP GET")
+
+    # ---- Trim roll/pitch (@TRIM) ----
+    def send_flight_trim_set(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the set @TRIM.")
+            return
+        r = self.trim_roll.get_value()
+        p = self.trim_pitch.get_value()
+        self.console.send_command(f"@TRIM SET {r:.2f} {p:.2f}")
+        self.trim_status_var.set("sending...")
+
+    def get_flight_trim(self):
+        if self.console is None:
+            return
+        self.console.send_command("@TRIM GET")
+
+    # ---- Altitude bản BAY (flight_control) ----
+    def send_flight_alt_set(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the set altitude (ban bay).")
+            return
+        v = self.flight_alt.get_values()
+        # @ALT SET <alt_kp> <vz_kp> <vz_ki> <vz_ilimit>  (hover đã sang @TKO)
+        self.console.send_command(
+            f"@ALT SET {v['kp']:.4f} {v['vzkp']:.2f} {v['vzki']:.2f} {v['vzilim']:.1f}")
+        self.console.send_command(f"@ALT TGT {v['tgt']:.2f}")   # target theo MÉT
+        self.flight_alt.status_var.set("sending...")
+
+    def get_flight_alt(self):
+        if self.console is None:
+            return
+        self.console.send_command("@ALT GET")
+
+    # ---- Ground/takeoff params (@TKO) ----
+    def send_flight_tko_set(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the set @TKO.")
+            return
+        v = self.tko.get_values()
+        # @TKO SET <hover> <spool_duty> <spool_ms> <timeout_ms> <liftoff_m>
+        self.console.send_command(
+            f"@TKO SET {v['hover']:.0f} {v['spool']:.0f} {v['ms']:.0f} "
+            f"{v['timeout']:.0f} {v['liftoff']:.2f}")
+        self.tko.status_var.set("sending...")
+
+    def get_flight_tko(self):
+        if self.console is None:
+            return
+        self.console.send_command("@TKO GET")
+
+    # ---- Landing (@LAND) ----
+    def send_flight_land_set(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the set @LAND.")
+            return
+        v = self.land.get_values()
+        # @LAND SET <descent_vz> <flare_alt> <flare_vz> <touchdown_alt>
+        self.console.send_command(
+            f"@LAND SET {v['dvz']:.2f} {v['flarealt']:.2f} "
+            f"{v['fvz']:.2f} {v['tdalt']:.2f}")
+        self.land.status_var.set("sending...")
+
+    def get_flight_land(self):
+        if self.console is None:
+            return
+        self.console.send_command("@LAND GET")
+
+    def send_flight_landing(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the LAND.")
+            return
+        # Kích landing tự động (firmware nhận khi armed + attitude valid).
+        self.send_raw_cmd("l")
+        self.land.status_var.set("LANDING...")
+
+    def send_flight_alt_mode(self, mode):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the doi mode altitude.")
+            return
+        # 0=OFF, 1=LOG_ONLY, 2=HOLD. @ALT MODE đặt tuyệt đối (không toggle như phim z).
+        self.console.send_command(f"@ALT MODE {int(mode)}")
+        self.flight_alt.status_var.set(f"MODE -> {int(mode)}")
+
+    def send_flight_takeoff(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the TAKEOFF.")
+            return
+        # KHÔNG cần đặt tgt(m): spool xong -> HOLD chốt ĐỘ CAO ĐO ĐƯỢC lúc đó.
+        # Firmware chỉ nhận khi armed + attitude/estimator valid; nếu không -> REJECTED.
+        self.console.send_command("@ALT TAKEOFF")
+        self.tko.status_var.set("TAKEOFF -> spool -> HOLD @ do cao do duoc")
+
+    def send_target_set(self):
+        if self.console is None:
+            self._log("[GUI] Chua ket noi, khong the set target.")
+            return
+        roll = self.target_roll.get_value()
+        pitch = self.target_pitch.get_value()
+        yaw = self.target_yaw.get_value()
+        # Pilot setpoint command handled by flight_control (writes s_setpoint):
+        # roll/pitch = target angle (deg), yaw = target yaw-RATE (dps).
+        self.console.send_command(f"@SP SET {roll:.3f} {pitch:.3f} {yaw:.3f}")
+        self.target_status_var.set("sending...")
+
+    def zero_target(self):
+        self.target_roll.set_value(0.0)
+        self.target_pitch.set_value(0.0)
+        self.target_yaw.set_value(0.0)
+        self.send_target_set()
+
+    # ---------------- receiving ----------------
+
+    def _on_line_from_rx_thread(self, line: str):
+        # Called from UavUdpConsole's socket thread: never touch Tk widgets
+        # here directly, just hand the line to the GUI thread via the queue.
+        self.line_queue.put(line)
+
+    def _poll_queue(self):
+        # BUG 3: nếu backlog dồn quá lớn (telemetry chảy nhanh hơn ta xử lý),
+        # drop bớt dòng cũ để không tụt hậu mãi -> main thread luôn kịp bắt phím.
+        backlog = self.line_queue.qsize()
+        if backlog > 500:
+            dropped = 0
+            while self.line_queue.qsize() > 250:
+                try:
+                    self.line_queue.get_nowait()
+                    dropped += 1
+                except queue.Empty:
+                    break
+            if dropped:
+                self._log(f"[GUI] telemetry qua nhanh, dang drop {dropped} dong cu")
+
+        # Giới hạn 20 dòng/lần poll, phần thừa để lần sau -> không ngốn main thread
+        # (parse + push 4 do thi + redraw) khiến GUI "đơ" / key event xử lý chậm.
+        for _ in range(20):
+            try:
+                self._handle_line(self.line_queue.get_nowait())
+            except queue.Empty:
+                break
+
+        self.root.after(50, self._poll_queue)
+
+    def _handle_line(self, line: str):
+        self._log(f"[ESP32] {line}")
+
+        # Feed the live plots from ANY line carrying R/P/Y + gyro (flight STATUS
+        # line or maintenance live-Mahony line). Done first + independently of the
+        # telemetry-label parsing so the chart works in every firmware mode.
+        mp = PLOT_RE.search(line)
+        if mp:
+            try:
+                sample = {
+                    "roll": float(mp.group(1)),
+                    "pitch": float(mp.group(2)),
+                    "gx": float(mp.group(4)),
+                    "gy": float(mp.group(5)),
+                    "gz": float(mp.group(6)),
+                }
+                if mp.group(3) is not None:      # yaw present (not in flight-balance line)
+                    sample["yaw"] = float(mp.group(3))
+                self.plot_angle.push(sample)
+                self.plot_gyro.push(sample)
+            except (ValueError, TypeError):
+                pass
+
+        # Accel từng trục (body, g, đã LPF) từ cụm "| A=ax ay az |" của STATUS.
+        mac = ACC_PLOT_RE.search(line)
+        if mac:
+            try:
+                self.plot_acc.push({
+                    "ax": float(mac.group(1)),
+                    "ay": float(mac.group(2)),
+                    "az": float(mac.group(3)),
+                })
+            except (ValueError, TypeError):
+                pass
+
+        # Độ cao: ALTm (estimator) / TOF (thô) / TGT (target) từ dòng STATUS.
+        ma = ALT_PLOT_RE.search(line)
+        if ma:
+            try:
+                self.plot_alt.push({
+                    "alt": float(ma.group(1)),
+                    "tgt": float(ma.group(2)),
+                    "tof": float(ma.group(3)),
+                })
+            except (ValueError, TypeError):
+                pass
+
+        m = PID_DUMP_RE.match(line)
+        if m:
+            loop, axis, kp, ki, kd, ilim, olim = m.groups()
+            group = self.groups.get((loop, axis))
+            if group is not None:
+                group.set_values(float(kp), float(ki), float(kd), float(ilim), float(olim))
+                if line.startswith("PID OK"):
+                    group.mark_ok()
+            return
+
+        m = PID_ERR_RE.match(line)
+        if m:
+            for group in self.groups.values():
+                if group.status_var.get() == "sending...":
+                    group.mark_err(m.group(1))
+            return
+
+        m = MAH_RE.match(line)
+        if m:
+            kp, ki = m.groups()
+            self.mah_kp.set_value(float(kp))
+            self.mah_ki.set_value(float(ki))
+            self.mah_status_var.set(f"OK  Kp={kp} Ki={ki}")
+            return
+
+        if line.startswith("MAH ERR"):
+            self.mah_status_var.set(line)
+            return
+
+        # Pilot setpoint reply ("SP R=.. P=.. Y=.." / "SP OK R=.. P=.. Y=..").
+        m = SP_RE.match(line)
+        if m:
+            roll, pitch, yaw = m.groups()
+            self.target_roll.set_value(float(roll))
+            self.target_pitch.set_value(float(pitch))
+            self.target_yaw.set_value(float(yaw))
+            self.target_status_var.set(f"OK  R={roll} P={pitch} Y={yaw}")
+            return
+
+        if line.startswith("SP ERR"):
+            self.target_status_var.set(line)
+            return
+
+        # Trim reply @TRIM -> panel Trim.
+        m = TRIM_RE.match(line)
+        if m:
+            r, p = m.groups()
+            self.trim_roll.set_value(float(r))
+            self.trim_pitch.set_value(float(p))
+            self.trim_status_var.set(f"OK roll={r} pitch={p}")
+            return
+
+        if line.startswith("TRIM ERR"):
+            self.trim_status_var.set(line)
+            return
+
+        # Altitude controller reply @ALT (chữ thường) -> panel "ALT controller".
+        m = FLIGHT_ALT_RE.match(line)
+        if m:
+            kp, vzkp, vzki, vzilim, tgt, mode = m.groups()
+            self.flight_alt.set_gains(
+                float(kp), float(vzkp), float(vzki), float(vzilim),
+                float(tgt) if tgt is not None else None)
+            self.flight_alt.mark_ok()
+            self.flight_alt.status_var.set(
+                f"OK kp={kp}" + (f" mode={mode}" if mode is not None else ""))
+            return
+
+        # Ground/takeoff reply @TKO -> panel "Takeoff / Ground".
+        m = TKO_RE.match(line)
+        if m:
+            hover, spool, ms, timeout, liftoff = m.groups()
+            self.tko.set_values(float(hover), float(spool), float(ms),
+                                float(timeout), float(liftoff))
+            self.tko.mark_ok()
+            self.tko.status_var.set(f"OK hover={hover} spool={spool} liftoff={liftoff}")
+            return
+
+        if line.startswith("TKO ERR"):
+            self.tko.status_var.set(line)
+            return
+
+        # Landing reply @LAND -> panel "Landing".
+        m = LAND_RE.match(line)
+        if m:
+            dvz, fa, fvz, td = m.groups()
+            self.land.set_values(float(dvz), float(fa), float(fvz), float(td))
+            self.land.mark_ok()
+            self.land.status_var.set(f"OK dvz={dvz} fvz={fvz} tdalt={td}")
+            return
+
+        if line.startswith("LAND ERR") or line.startswith("LAND REJECTED") \
+                or line.startswith("LAND started"):
+            self.land.status_var.set(line)
+            return
+
+        # BẢN BAY: reply @ALT TGT / @ALT MODE / TAKEOFF -> chỉ hiện trạng thái.
+        if (line.startswith("ALT TGT=") or line.startswith("ALT MODE=")
+                or line.startswith("ALT TAKEOFF")):
+            self.flight_alt.status_var.set(line)
+            return
+
+        if line.startswith("ALT ERR"):
+            self.flight_alt.status_var.set(line)
+            return
+
+        m = STATUS_RE.match(line)
+        if m:
+            g = m.groups()
+            armed, thr, roll, pitch, yaw = g[0], g[1], g[2], g[3], g[4]
+            valid = g[8]
+            acc_norm, accel_used, yaw_rel = g[9], g[10], g[11]
+            altm, vz, atgt, amode, av, tof, _tok, terr = g[12:20]
+            tko, ki, land = g[20], g[21], g[22]   # TKO=spool, KI=I-term, LAND=pha landing
+
+            text = (
+                f"ARM={'YES' if armed == '1' else 'no'} THR={thr} | "
+                f"R={roll} P={pitch} Y={yaw} | valid={valid}"
+            )
+
+            if acc_norm is not None:
+                # ACCU=0 -> firmware da bo qua mau accel nay (rung dong co /
+                # gia toc khac trong luc), pitch/roll dang chi dua vao gyro.
+                # Neu pitch tang theo throttle ma ACCU van la 1 va ACC gan 1.0,
+                # nhieu kha nang la mat can bang co khi/canh quat that, khong
+                # phai loi UDP hay loi EKF.
+                acc_flag = "OK" if accel_used == "1" else "GATED(vibration?)"
+                text += f" | ACC={acc_norm}g accel={acc_flag}"
+
+            if yaw_rel is not None:
+                # Yaw tuong doi so voi huong luc ARM (heading-hold latch).
+                text += f" | YAWREL={yaw_rel}"
+
+            # Cụm altitude bản BAY (nếu có) -> label telemetry + panel "ALT bay".
+            if altm is not None:
+                names = {"0": "OFF", "1": "LOG", "2": "HOLD", "3": "TAKEOFF", "4": "LANDING"}
+                text += (f" | ALT={altm}m vz={vz} tgt={atgt} "
+                         f"mode={names.get(amode, amode)} tof={tof} av={av}")
+                try:
+                    self.flight_alt.set_live(
+                        float(altm), float(vz), float(atgt), int(amode),
+                        float(tof), av, terr)
+                except (ValueError, TypeError):
+                    pass
+
+            # Duty 4 motor (nếu có trong dòng) -> hiện gọn trên nhãn.
+            mmo = MOTOR_RE.search(line)
+            if mmo:
+                text += f" | M={'/'.join(mmo.groups())}"
+
+            # Ki (I-term angle/rate) đang DÙNG hay KHÓA + pha takeoff (spool).
+            if ki is not None:
+                text += f" | Ki={'DUNG' if ki == '1' else 'KHOA'}"
+            if tko is not None and tko != "0":
+                text += " | TKO=SPOOL"
+            land_names = {"1": "DESCEND", "2": "FLARE", "3": "TOUCHDOWN", "4": "BLIND"}
+            if land is not None and land != "0":
+                text += f" | LAND={land_names.get(land, land)}"
+
+            self.telemetry_var.set(text)
+
+            # ---- Nuôi tab Manual Control ----
+            if altm is not None:
+                self._last_alt_target = atgt
+            if hasattr(self, "manual_status_var"):
+                mnames = {"0": "OFF", "1": "LOG", "2": "HOLD", "3": "TAKEOFF", "4": "LANDING"}
+                armed_yes = (armed == "1")
+                self.manual_status_var.set(
+                    f"ARM={'YES' if armed_yes else 'no'}   "
+                    f"mode={mnames.get(amode, amode) if amode is not None else '?'}   "
+                    f"alt={altm if altm is not None else '?'}m")
+                self._update_manual_cmd_label()
+                # Takeoff chỉ enable khi đã ARM; Land luôn enable.
+                if hasattr(self, "manual_takeoff_btn"):
+                    self.manual_takeoff_btn.configure(
+                        state=("normal" if armed_yes else "disabled"))
+                # Throttle 4 motor (M= trong dòng STATUS).
+                if hasattr(self, "manual_motor_var") and mmo:
+                    m1, m2, m3, m4 = mmo.groups()
+                    self.manual_motor_var.set(
+                        f"M1={m1}   M2={m2}   M3={m3}   M4={m4}")
+            return
+
+    def _log(self, text: str):
+        self.log_text.configure(state="normal")
+        self.log_text.insert(tk.END, text + "\n")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state="disabled")
+
+
+def run_gui(args):
+    if not _TK_AVAILABLE:
+        print(
+            "Tkinter khong co san trong Python nay. "
+            "Cai dat lai Python tu python.org (mac dinh co Tkinter) "
+            "hoac dung --cli de chay console dang text.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    root = tk.Tk()
+
+    # Size to fit the actual screen, never taller than it — otherwise the plots
+    # (bottom of the window) end up below the screen edge / behind the taskbar
+    # and look "missing".
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    win_w = min(1240, sw - 40)
+    win_h = min(980, sh - 80)
+    root.geometry(f"{win_w}x{win_h}+20+10")
+    root.minsize(900, 600)
+
+    PidTunerApp(root, args.host, args.port, args.bind_port, args.debug)
+    root.mainloop()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="UAV-Mini UDP console + PID tuner",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        "host", nargs="?", default=None,
+        help="IP cua ESP32, vi du 192.168.1.19 (GUI: co the de trong roi nhap trong app)",
+    )
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="UDP port cua ESP32, mac dinh 4210")
+    parser.add_argument("--bind-port", type=int, default=None, help="Local UDP port cua PC, thuong khong can")
+    parser.add_argument("--debug", action="store_true", help="In packet TX de debug")
+    parser.add_argument("--cli", action="store_true", help="Dung console dang go lenh text, khong mo GUI")
+
+    args = parser.parse_args()
+
+    if args.cli:
+        if not args.host:
+            parser.error("host la bat buoc khi dung --cli")
+        run_cli(args)
+    else:
+        run_gui(args)
+
+
+if __name__ == "__main__":
+    main()
