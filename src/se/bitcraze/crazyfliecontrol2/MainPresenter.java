@@ -6,6 +6,8 @@ import java.io.File;
 import java.io.IOException;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import se.bitcraze.crazyflie.lib.crazyflie.ConnectionAdapter;
 import se.bitcraze.crazyflie.lib.crazyflie.Crazyflie;
@@ -32,6 +34,26 @@ import se.bitcraze.crazyfliecontrol.controller.IController;
 public class MainPresenter {
 
     private static final String LOG_TAG = "Crazyflie-MainPresenter";
+    // The vertical Y/T stick adjusts the altitude target, not raw throttle.
+    // At 100% deflection it changes at most 1 cm every 0.5 second.
+    private static final long UAV_ALTITUDE_REPEAT_MS = 500L;
+    private static final float UAV_ALTITUDE_STEP_METERS = 0.01f;
+    private static final float UAV_ALTITUDE_MIN_METERS = 0.0f;
+    private static final float UAV_ALTITUDE_MAX_METERS = 2.0f;
+
+    private static final Pattern STATUS_ARM = Pattern.compile("(?:^|\\s)ARM=(\\d+)");
+    private static final Pattern STATUS_THR = Pattern.compile("(?:^|\\s)THR=(-?\\d+)");
+    private static final Pattern STATUS_VALID = Pattern.compile("(?:valid|Val)=(\\d+)");
+    private static final Pattern STATUS_ALT = Pattern.compile("ALTm=([-\\d.]+)");
+    private static final Pattern STATUS_VZ = Pattern.compile("VZ=([-\\d.]+)");
+    private static final Pattern STATUS_TGT = Pattern.compile("TGT=([-\\d.]+)");
+    private static final Pattern STATUS_MODE = Pattern.compile("MODE=(\\d+)");
+    private static final Pattern STATUS_AV = Pattern.compile("AV=(\\d+)");
+    private static final Pattern STATUS_TOK = Pattern.compile("TOK=(\\d+)");
+    private static final Pattern STATUS_TERR = Pattern.compile("TERR=(\\d+)");
+    private static final Pattern STATUS_MOTORS = Pattern.compile(
+            "M\\s*=\\s*(-?\\d+) (-?\\d+) (-?\\d+) (-?\\d+)");
+    private static final Pattern ALT_TARGET_REPLY = Pattern.compile("ALT TGT=([-\\d.]+)");
 
     private MainActivity mainActivity;
 
@@ -56,6 +78,7 @@ public class MainPresenter {
 
     private Thread mSendJoystickDataThread;
     private ConsoleListener mConsoleListener;
+    private volatile float mUavAltitudeTarget = Float.NaN;
 
     public MainPresenter(MainActivity mainActivity) {
         this.mainActivity = mainActivity;
@@ -69,13 +92,18 @@ public class MainPresenter {
         @Override
         public void onConnected(String host, int port) {
             mUavUdpConnecting = false;
+            mUavAltitudeTarget = Float.NaN;
             if (mainActivity == null) {
                 return;
             }
-            mainActivity.showToastie("UDP connected to " + host + ":" + port);
+            mainActivity.showToastie("Đã kết nối UDP tới " + host + ":" + port);
             mainActivity.setConnectionButtonConnected();
             mainActivity.setLinkQualityText("UDP");
             mainActivity.setUavActionButtonsEnabled(true);
+            mainActivity.updateUavStatus(
+                    "Thiết bị: ĐANG CHỜ DỮ LIỆU\n"
+                            + "Kết nối: Đã kết nối UDP tới " + host + ":" + port,
+                    false);
             startUavControlThread();
             requestUavConfigurationSnapshot();
         }
@@ -83,20 +111,27 @@ public class MainPresenter {
         @Override
         public void onDisconnected() {
             mUavUdpConnecting = false;
+            mUavAltitudeTarget = Float.NaN;
             stopSendJoystickDataThread();
             if (mainActivity == null) {
                 return;
             }
-            mainActivity.showToastie("UDP disconnected");
+            mainActivity.showToastie("Đã ngắt kết nối UDP");
             mainActivity.setConnectionButtonDisconnected();
             mainActivity.setUavActionButtonsEnabled(false);
             mainActivity.setLinkQualityText("N/A");
+            mainActivity.updateUavStatus(
+                    "Thiết bị: CHƯA SẴN SÀNG\nKết nối: Đã ngắt", false);
         }
 
         @Override
         public void onMessage(String line) {
             if (mainActivity != null) {
-                mainActivity.appendToConsole(line);
+                // STATUS arrives very quickly. Render it in the fixed status
+                // panel and keep the scrolling console for ACK/errors only.
+                if (!handleUavTelemetry(line)) {
+                    mainActivity.appendToConsole(line);
+                }
             }
         }
 
@@ -297,7 +332,7 @@ public class MainPresenter {
                 float lastPitch = Float.NaN;
                 float lastYaw = Float.NaN;
                 long lastSetpointTime = 0L;
-                String lastThrottleCommand = null;
+                long lastAltitudeCommandTime = 0L;
 
                 while (mainActivity != null && mUavUdpLink != null && mUavUdpLink.isConnected()) {
                     IController controller = mainActivity.getController();
@@ -323,28 +358,31 @@ public class MainPresenter {
                     }
 
                     float throttleAxis = getUavThrottleAxis();
-                    float deadzone = mainActivity.getControls().getDeadzone();
-                    String throttleCommand = null;
-                    if (Math.abs(throttleAxis) > deadzone) {
-                        if (throttleAxis >= 0.75f) {
-                            throttleCommand = "+";
-                        } else if (throttleAxis > 0.0f) {
-                            throttleCommand = "]";
-                        } else if (throttleAxis <= -0.75f) {
-                            throttleCommand = "-";
-                        } else {
-                            throttleCommand = "[";
+                    Controls controls = mainActivity.getControls();
+                    float deadzone = controls.getDeadzone();
+                    boolean throttleNeutral = Math.abs(throttleAxis) <= deadzone;
+                    if (!throttleNeutral && !Float.isNaN(mUavAltitudeTarget)
+                            && now - lastAltitudeCommandTime >= UAV_ALTITUDE_REPEAT_MS) {
+                        float magnitude = Math.min(1.0f, Math.abs(throttleAxis));
+                        float minPercent = controls.getMinThrust();
+                        float maxPercent = controls.getMaxThrust();
+                        // Same T percentage scale shown by FlightDataView.
+                        float controlPercent = minPercent
+                                + magnitude * Math.max(0.0f, maxPercent - minPercent);
+                        float percentageFactor = Math.min(1.0f,
+                                Math.max(0.0f, controlPercent / 100.0f));
+                        float direction = throttleAxis > 0.0f ? 1.0f : -1.0f;
+                        float deltaMeters = UAV_ALTITUDE_STEP_METERS
+                                * percentageFactor * direction;
+                        float newTarget = Math.max(UAV_ALTITUDE_MIN_METERS,
+                                Math.min(UAV_ALTITUDE_MAX_METERS,
+                                        mUavAltitudeTarget + deltaMeters));
+                        if (Math.abs(newTarget - mUavAltitudeTarget) >= 0.0005f) {
+                            mUavAltitudeTarget = newTarget;
+                            sendUavCommand(String.format(
+                                    Locale.US, "@ALT TGT %.3f", newTarget));
                         }
-                    }
-
-                    // The Python console sends one throttle command per button
-                    // press. Treat each new stick deflection as one press too;
-                    // returning to centre re-arms the next command.
-                    if (throttleCommand == null) {
-                        lastThrottleCommand = null;
-                    } else if (!throttleCommand.equals(lastThrottleCommand)) {
-                        sendUavCommand(throttleCommand);
-                        lastThrottleCommand = throttleCommand;
+                        lastAltitudeCommandTime = now;
                     }
 
                     try {
@@ -366,6 +404,96 @@ public class MainPresenter {
         return (controls.getMode() == 1 || controls.getMode() == 3)
                 ? controls.getRightAnalog_Y()
                 : controls.getLeftAnalog_Y();
+    }
+
+    /**
+     * Parse the fast STATUS telemetry into a stable Vietnamese summary.
+     * Returns true when the line is high-rate telemetry and should not also be
+     * appended to the scrolling console.
+     */
+    private boolean handleUavTelemetry(String line) {
+        if (line == null) {
+            return false;
+        }
+
+        Matcher targetReply = ALT_TARGET_REPLY.matcher(line);
+        if (targetReply.find()) {
+            mUavAltitudeTarget = parseFloat(targetReply.group(1), mUavAltitudeTarget);
+        }
+
+        Matcher armMatcher = STATUS_ARM.matcher(line);
+        if (!armMatcher.find()) {
+            return false;
+        }
+
+        String armed = armMatcher.group(1);
+        String throttle = findValue(STATUS_THR, line, "?");
+        String valid = findValue(STATUS_VALID, line, "0");
+        String altitude = findValue(STATUS_ALT, line, "?");
+        String verticalSpeed = findValue(STATUS_VZ, line, "?");
+        String target = findValue(STATUS_TGT, line, null);
+        String mode = findValue(STATUS_MODE, line, "?");
+        String altitudeValid = findValue(STATUS_AV, line, null);
+        String tofOk = findValue(STATUS_TOK, line, null);
+        String tofError = findValue(STATUS_TERR, line, null);
+        String motors = findMotorValues(line);
+
+        if (target != null) {
+            mUavAltitudeTarget = parseFloat(target, mUavAltitudeTarget);
+        }
+
+        boolean attitudeReady = "1".equals(valid);
+        boolean hasAltitudeStatus = altitudeValid != null;
+        boolean altitudeReady = !hasAltitudeStatus || ("1".equals(altitudeValid)
+                && (tofOk == null || "1".equals(tofOk))
+                && (tofError == null || "0".equals(tofError)));
+        boolean ready = attitudeReady && altitudeReady;
+
+        String status = "Thiết bị: " + (ready ? "SẴN SÀNG" : "CHƯA SẴN SÀNG")
+                + "\nKết nối: UDP | ARM: " + ("1".equals(armed) ? "Đã bật" : "Chưa bật")
+                + " | Ga firmware: " + throttle
+                + "\nCân bằng: " + (attitudeReady ? "Tốt" : "Chưa hợp lệ")
+                + " | Cảm biến cao: " + (altitudeReady ? "Sẵn sàng" : "Có lỗi")
+                + "\nĐộ cao: " + altitude + " m | Mục tiêu: "
+                + (target == null ? "?" : target) + " m | Vận tốc: " + verticalSpeed + " m/s"
+                + "\nChế độ cao: " + altitudeModeName(mode)
+                + " | Motor: " + motors
+                + "\nCần độ cao: 0,5 giây/nhịp, tối đa 1 cm";
+        if (mainActivity != null) {
+            mainActivity.updateUavStatus(status, ready);
+        }
+        return true;
+    }
+
+    private String findValue(Pattern pattern, String line, String fallback) {
+        Matcher matcher = pattern.matcher(line);
+        return matcher.find() ? matcher.group(1) : fallback;
+    }
+
+    private String findMotorValues(String line) {
+        Matcher matcher = STATUS_MOTORS.matcher(line);
+        if (!matcher.find()) {
+            return "?";
+        }
+        return matcher.group(1) + "/" + matcher.group(2) + "/"
+                + matcher.group(3) + "/" + matcher.group(4);
+    }
+
+    private float parseFloat(String value, float fallback) {
+        try {
+            return Float.parseFloat(value);
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private String altitudeModeName(String mode) {
+        if ("0".equals(mode)) return "Tắt";
+        if ("1".equals(mode)) return "Chỉ ghi log";
+        if ("2".equals(mode)) return "Giữ độ cao";
+        if ("3".equals(mode)) return "Đang cất cánh";
+        if ("4".equals(mode)) return "Đang hạ cánh";
+        return "Chưa rõ";
     }
 
     /**
@@ -433,7 +561,7 @@ public class MainPresenter {
         final int targetPort = port;
         mUavUdpLink = link;
         mUavUdpConnecting = true;
-        mainActivity.showToastie("Opening UDP to " + targetHost + ":" + targetPort + " ...");
+            mainActivity.showToastie("Đang mở UDP tới " + targetHost + ":" + targetPort + " ...");
 
         // DNS lookup, socket creation and the first datagram must not run on
         // Android's UI thread (NetworkOnMainThreadException on real devices).

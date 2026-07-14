@@ -99,6 +99,7 @@ public class MainActivity extends EspActivity {
 
     private ScrollView mConsoleScrollView;
     private TextView mConsoleTextView;
+    private TextView mUavStatusText;
 
     private SharedPreferences mPreferences;
 
@@ -173,6 +174,7 @@ public class MainActivity extends EspActivity {
 
         mConsoleScrollView = (ScrollView) findViewById(R.id.console_scrollView);
         mConsoleTextView = (TextView) findViewById(R.id.console_textView);
+        mUavStatusText = (TextView) findViewById(R.id.uav_status_text);
         registerForContextMenu(mConsoleTextView);
 
         //action buttons
@@ -699,7 +701,7 @@ public class MainActivity extends EspActivity {
         }
         new AlertDialog.Builder(this)
                 .setTitle("ARM")
-                .setMessage("Motors will be enabled. Remove the propellers or secure the frame before testing. Continue?")
+                .setMessage("Động cơ sẽ được cho phép hoạt động. Hãy tháo cánh quạt hoặc cố định khung trước khi thử. Tiếp tục?")
                 .setPositiveButton(android.R.string.yes, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
@@ -850,6 +852,19 @@ public class MainActivity extends EspActivity {
             @Override
             public void run() {
                 mHeadlightButton.setTextColor(toggle ? Color.parseColor("#00AA00") : Color.BLACK);
+            }
+        });
+    }
+
+    public void updateUavStatus(final String status, final boolean ready) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mUavStatusText != null) {
+                    mUavStatusText.setText(status);
+                    mUavStatusText.setTextColor(Color.parseColor(
+                            ready ? "#087F23" : "#B00020"));
+                }
             }
         });
     }

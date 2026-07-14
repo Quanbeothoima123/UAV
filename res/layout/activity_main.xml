@@ -150,13 +150,26 @@
         android:layout_centerHorizontal="true"
         android:layout_marginTop="10dp" />
 
+    <TextView
+        android:id="@+id/uav_status_text"
+        android:layout_width="360dp"
+        android:layout_height="wrap_content"
+        android:layout_below="@+id/flightdataview"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="4dp"
+        android:background="@drawable/stroke_bg"
+        android:padding="6dp"
+        android:text="@string/uav_status_initial"
+        android:textColor="#B00020"
+        android:textSize="12sp" />
+
     <ScrollView
         android:id="@+id/console_scrollView"
         android:layout_width="180dp"
-        android:layout_height="200dp"
-        android:layout_below="@+id/flightdataview"
+        android:layout_height="90dp"
+        android:layout_below="@+id/uav_status_text"
         android:layout_centerHorizontal="true"
-        android:layout_marginTop="25dp"
+        android:layout_marginTop="4dp"
         android:background="@drawable/stroke_bg"
         android:fillViewport="true"
         android:scrollbars="vertical">

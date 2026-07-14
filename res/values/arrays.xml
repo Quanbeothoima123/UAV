@@ -13,10 +13,10 @@
     </string-array>
 
     <string-array name="modeEntries">
-        <item>Mode 1 (Left: Pitch &amp; Yaw, Right: Thrust &amp; Roll)</item>
-        <item>Mode 2 (Left: Thrust &amp; Yaw, Right: Pitch &amp; Roll)</item>
-        <item>Mode 3 (Left: Pitch &amp; Roll, Right: Thrust &amp; Yaw)</item>
-        <item>Mode 4 (Left: Thrust &amp; Roll, Right: Pitch &amp; Yaw)</item>
+        <item>Mode 1 (Trái: Pitch/Yaw, Phải: Độ cao/Roll)</item>
+        <item>Mode 2 (Trái: Độ cao/Yaw, Phải: Pitch/Roll)</item>
+        <item>Mode 3 (Trái: Pitch/Roll, Phải: Độ cao/Yaw)</item>
+        <item>Mode 4 (Trái: Độ cao/Roll, Phải: Pitch/Yaw)</item>
     </string-array>
 
     <string-array name="modeValues">
@@ -27,8 +27,8 @@
     </string-array>
 
     <string-array name="controllerEntries">
-        <item>Touch</item>
-        <item>Gamepad</item>
+        <item>Joystick cảm ứng</item>
+        <item>Tay cầm vật lý</item>
     </string-array>
 
     <string-array name="controllerValues">
@@ -37,9 +37,9 @@
     </string-array>
 
     <string-array name="actionEntries">
-        <item>LED ring: Enable headlight</item>
-        <item>LED ring: Cycle ring effect</item>
-        <item>Buzzer: Play Imperial March</item>
+        <item>Vòng LED: Bật đèn trước</item>
+        <item>Vòng LED: Đổi hiệu ứng</item>
+        <item>Còi: Phát nhạc</item>
     </string-array>
 
     <string-array name="actionValues">
