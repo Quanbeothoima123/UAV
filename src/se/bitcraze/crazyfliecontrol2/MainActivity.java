@@ -544,7 +544,10 @@ public class MainActivity extends EspActivity {
 
     //TODO: fix indirection
     public void updateFlightData(){
-        mFlightDataView.updateFlightData(mController.getPitch(), mController.getRoll(), mController.getThrust(), mController.getYaw());
+        // Show the same signed P/R/Y values that the UDP controller sends to
+        // the current Python-compatible firmware.
+        mFlightDataView.updateFlightData(-mController.getPitch(), -mController.getRoll(),
+                mController.getThrust(), -mController.getYaw());
     }
 
     public void appendToConsole(String text) {

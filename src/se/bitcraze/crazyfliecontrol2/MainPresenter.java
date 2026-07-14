@@ -35,11 +35,18 @@ public class MainPresenter {
 
     private static final String LOG_TAG = "Crazyflie-MainPresenter";
     // The vertical Y/T stick adjusts the altitude target, not raw throttle.
-    // At 100% deflection it changes at most 1 cm every 0.5 second.
+    // At 100% deflection it changes at most 5 cm every 0.5 second.
     private static final long UAV_ALTITUDE_REPEAT_MS = 500L;
-    private static final float UAV_ALTITUDE_STEP_METERS = 0.01f;
+    private static final float UAV_ALTITUDE_STEP_METERS = 0.05f;
     private static final float UAV_ALTITUDE_MIN_METERS = 0.0f;
     private static final float UAV_ALTITUDE_MAX_METERS = 2.0f;
+
+    // Defaults from the current Python Auto-brake panel.
+    private static final float UAV_BRAKE_K = 0.9f;
+    private static final float UAV_BRAKE_RATIO = 0.8f;
+    private static final long UAV_BRAKE_MIN_MS = 100L;
+    private static final long UAV_BRAKE_MAX_MS = 1000L;
+    private static final float UAV_AXIS_ACTIVE_EPSILON = 0.01f;
 
     private static final Pattern STATUS_ARM = Pattern.compile("(?:^|\\s)ARM=(\\d+)");
     private static final Pattern STATUS_THR = Pattern.compile("(?:^|\\s)THR=(-?\\d+)");
@@ -79,6 +86,58 @@ public class MainPresenter {
     private Thread mSendJoystickDataThread;
     private ConsoleListener mConsoleListener;
     private volatile float mUavAltitudeTarget = Float.NaN;
+    private volatile boolean mUavAutoBraking;
+
+    private static class UavBrakeAxis {
+        private int heldSign;
+        private long holdStartMs;
+        private float brakeCommand;
+        private long brakeUntilMs;
+
+        boolean isNewPilotInput(float pilotCommand) {
+            if (Math.abs(pilotCommand) < UAV_AXIS_ACTIVE_EPSILON) {
+                return false;
+            }
+            int sign = pilotCommand > 0.0f ? 1 : -1;
+            return heldSign == 0 || heldSign != sign;
+        }
+
+        void cancelBrake() {
+            brakeCommand = 0.0f;
+            brakeUntilMs = 0L;
+        }
+
+        float update(float pilotCommand, long nowMs, float tiltStep) {
+            if (Math.abs(pilotCommand) >= UAV_AXIS_ACTIVE_EPSILON) {
+                int sign = pilotCommand > 0.0f ? 1 : -1;
+                if (heldSign != sign) {
+                    heldSign = sign;
+                    holdStartMs = nowMs;
+                }
+                return pilotCommand;
+            }
+
+            if (heldSign != 0) {
+                long holdDurationMs = Math.max(0L, nowMs - holdStartMs);
+                long brakeDurationMs = Math.max(UAV_BRAKE_MIN_MS,
+                        Math.min(UAV_BRAKE_MAX_MS,
+                                Math.round(UAV_BRAKE_K * holdDurationMs)));
+                brakeCommand = -heldSign * tiltStep * UAV_BRAKE_RATIO;
+                brakeUntilMs = nowMs + brakeDurationMs;
+                heldSign = 0;
+            }
+
+            if (nowMs < brakeUntilMs) {
+                return brakeCommand;
+            }
+            cancelBrake();
+            return 0.0f;
+        }
+
+        boolean isBraking(long nowMs) {
+            return nowMs < brakeUntilMs && Math.abs(brakeCommand) > 0.0f;
+        }
+    }
 
     public MainPresenter(MainActivity mainActivity) {
         this.mainActivity = mainActivity;
@@ -93,6 +152,7 @@ public class MainPresenter {
         public void onConnected(String host, int port) {
             mUavUdpConnecting = false;
             mUavAltitudeTarget = Float.NaN;
+            mUavAutoBraking = false;
             if (mainActivity == null) {
                 return;
             }
@@ -112,6 +172,7 @@ public class MainPresenter {
         public void onDisconnected() {
             mUavUdpConnecting = false;
             mUavAltitudeTarget = Float.NaN;
+            mUavAutoBraking = false;
             stopSendJoystickDataThread();
             if (mainActivity == null) {
                 return;
@@ -333,6 +394,9 @@ public class MainPresenter {
                 float lastYaw = Float.NaN;
                 long lastSetpointTime = 0L;
                 long lastAltitudeCommandTime = 0L;
+                UavBrakeAxis rollBrake = new UavBrakeAxis();
+                UavBrakeAxis pitchBrake = new UavBrakeAxis();
+                int heldYawSign = 0;
 
                 while (mainActivity != null && mUavUdpLink != null && mUavUdpLink.isConnected()) {
                     IController controller = mainActivity.getController();
@@ -340,10 +404,34 @@ public class MainPresenter {
                         break;
                     }
 
-                    float roll = -controller.getRoll();
-                    float pitch = -controller.getPitch();
-                    float yaw = controller.getYaw();
+                    float pilotRoll = -controller.getRoll();
+                    float pilotPitch = -controller.getPitch();
+                    // Current Python mapping: turn left is positive yaw-rate,
+                    // turn right is negative.
+                    float yaw = -controller.getYaw();
                     long now = System.currentTimeMillis();
+
+                    boolean yawActive = Math.abs(yaw) >= UAV_AXIS_ACTIVE_EPSILON;
+                    int yawSign = yawActive ? (yaw > 0.0f ? 1 : -1) : 0;
+                    boolean newYawInput = yawSign != 0 && yawSign != heldYawSign;
+                    boolean newDirectionalInput = rollBrake.isNewPilotInput(pilotRoll)
+                            || pitchBrake.isNewPilotInput(pilotPitch)
+                            || newYawInput;
+                    // Python rule 1: any newly pressed direction cancels every
+                    // brake that is currently running; the pilot always wins.
+                    if (newDirectionalInput) {
+                        rollBrake.cancelBrake();
+                        pitchBrake.cancelBrake();
+                    }
+                    heldYawSign = yawSign;
+
+                    // Python limits TILT step to 1..10 degrees. Keep the same
+                    // guard even if legacy Android advanced settings are higher.
+                    float tiltStep = Math.max(1.0f, Math.min(10.0f,
+                            mainActivity.getControls().getRollPitchFactor()));
+                    float roll = rollBrake.update(pilotRoll, now, tiltStep);
+                    float pitch = pitchBrake.update(pilotPitch, now, tiltStep);
+                    mUavAutoBraking = rollBrake.isBraking(now) || pitchBrake.isBraking(now);
 
                     boolean changed = Float.isNaN(lastRoll)
                             || Math.abs(roll - lastRoll) >= 0.01f
@@ -458,7 +546,8 @@ public class MainPresenter {
                 + (target == null ? "?" : target) + " m | Vận tốc: " + verticalSpeed + " m/s"
                 + "\nChế độ cao: " + altitudeModeName(mode)
                 + " | Motor: " + motors
-                + "\nCần độ cao: 0,5 giây/nhịp, tối đa 1 cm";
+                + "\nPhanh ngang: " + (mUavAutoBraking ? "ĐANG PHANH" : "Sẵn sàng")
+                + " | Cần cao: 0,5 giây/nhịp, tối đa 5 cm";
         if (mainActivity != null) {
             mainActivity.updateUavStatus(status, ready);
         }

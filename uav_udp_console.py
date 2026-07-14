@@ -906,11 +906,15 @@ class PidTunerApp:
         self._last_alt_target = None   # TGT= từ telemetry (hiện trên tab Manual)
         # nút hướng -> token; phím -> nút hướng.
         # Quy ước dấu (khớp firmware): tiến=pitch âm, lùi=pitch dương;
-        # phải=roll âm, trái=roll dương; quay trái=yaw giảm, quay phải=yaw tăng.
+        # phải=roll âm, trái=roll dương; A=yaw dương, D=yaw âm (đúng chiều drone thật).
         self._dir_token = {"up": "pitch-", "down": "pitch+", "left": "roll+",
-                           "right": "roll-", "yaw_l": "yaw-", "yaw_r": "yaw+"}
+                           "right": "roll-", "yaw_l": "yaw+", "yaw_r": "yaw-"}
         self.KEY_TO_DIR = {"up": "up", "down": "down", "left": "left",
                            "right": "right", "a": "yaw_l", "d": "yaw_r"}
+        # Phím tắt trim (tab Manual): q/e = roll -/+, 1/3 = pitch -/+, mỗi nhấn 1 bước.
+        self._TRIM_KEYS = {"q": ("roll", -1), "e": ("roll", +1),
+                           "1": ("pitch", -1), "3": ("pitch", +1)}
+        self._trim_keys_down = set()   # chặn auto-repeat -> 1 nhấn = 1 bước
 
         self._build_ui()
         self.root.after(50, self._poll_queue)
@@ -1188,8 +1192,8 @@ class PidTunerApp:
         brakef = ttk.LabelFrame(outer, text="Auto-brake (roll/pitch)")
         brakef.pack(side=tk.TOP, anchor="w", pady=(0, 10))
         self._autobrake_var = tk.BooleanVar(value=True)
-        self.brake_k_var = tk.DoubleVar(value=0.6)
-        self.brake_ratio_var = tk.DoubleVar(value=0.7)
+        self.brake_k_var = tk.DoubleVar(value=0.9)
+        self.brake_ratio_var = tk.DoubleVar(value=0.8)
         self.brake_min_var = tk.DoubleVar(value=0.10)
         self.brake_max_var = tk.DoubleVar(value=1.00)
         ttk.Checkbutton(brakef, text="Auto-brake", variable=self._autobrake_var).grid(
@@ -1243,6 +1247,34 @@ class PidTunerApp:
                   bg="#b5651d", fg="white", activebackground="#c9761f",
                   font=("Segoe UI", 9, "bold"),
                   command=self.send_flight_landing).grid(row=1, column=0, padx=2, pady=2)
+
+        # ---- Trim live (@TRIM): dò bias roll/pitch ngay khi bay, mỗi bước 0.02 deg ----
+        # Dùng CHUNG state trim_roll/trim_pitch (panel Config) làm nguồn -> Config &
+        # Manual luôn đồng bộ. Mỗi nút nudge -> gửi @TRIM SET ngay.
+        trimf = ttk.LabelFrame(pad, text="Trim live (@TRIM) - do bias")
+        trimf.grid(row=0, column=4, padx=6, pady=4, sticky="n")
+        self.trim_step_var = tk.DoubleVar(value=0.02)
+        self.manual_trim_var = tk.StringVar(value="roll=?  pitch=?")
+        ttk.Label(trimf, textvariable=self.manual_trim_var,
+                  font=("Consolas", 10)).grid(row=0, column=0, columnspan=3,
+                                              sticky="w", padx=2, pady=(2, 4))
+        ttk.Label(trimf, text="roll (q/e)").grid(row=1, column=0, padx=2, sticky="e")
+        tk.Button(trimf, text="-", width=3,
+                  command=lambda: self._trim_nudge("roll", -1)).grid(row=1, column=1, padx=1)
+        tk.Button(trimf, text="+", width=3,
+                  command=lambda: self._trim_nudge("roll", +1)).grid(row=1, column=2, padx=1)
+        ttk.Label(trimf, text="pitch (1/3)").grid(row=2, column=0, padx=2, sticky="e")
+        tk.Button(trimf, text="-", width=3,
+                  command=lambda: self._trim_nudge("pitch", -1)).grid(row=2, column=1, padx=1)
+        tk.Button(trimf, text="+", width=3,
+                  command=lambda: self._trim_nudge("pitch", +1)).grid(row=2, column=2, padx=1)
+        ttk.Label(trimf, text="step").grid(row=3, column=0, padx=2, pady=(4, 0), sticky="e")
+        tk.Spinbox(trimf, from_=0.01, to=0.50, increment=0.01, width=5,
+                   textvariable=self.trim_step_var).grid(row=3, column=1, columnspan=2,
+                                                         padx=1, pady=(4, 0))
+        ttk.Button(trimf, text="Get", width=6, command=self.get_flight_trim).grid(
+            row=4, column=0, columnspan=3, pady=(4, 0), sticky="ew")
+        self._update_manual_trim_label()
 
         tk.Button(outer,
                   text="PANIC / LEVEL (Space)  -  ve thang bang, giu do cao (KHONG cat motor)",
@@ -1380,6 +1412,25 @@ class PidTunerApp:
             f"cmd_roll={self.cmd_roll:+.1f}  cmd_pitch={self.cmd_pitch:+.1f}  "
             f"cmd_yaw_rate={self.cmd_yaw:+.1f}   |   alt_target={tgt}")
 
+    # ---- trim live (@TRIM) — dò bias roll/pitch trong tab Manual ----
+    def _trim_nudge(self, axis, sign):
+        # Cộng/trừ step (mặc định 0.02 deg) vào trim của trục rồi gửi @TRIM SET NGAY.
+        # Dùng chung GainRow trim_roll/trim_pitch (panel Config) làm nguồn dữ liệu.
+        step = self._get_step(self.trim_step_var, 0.02)
+        row = self.trim_roll if axis == "roll" else self.trim_pitch
+        newv = min(max(row.get_value() + sign * step, -10.0), 10.0)
+        row.set_value(newv)
+        self.send_flight_trim_set()          # gửi cả roll+pitch (đủ 2 token firmware)
+        self._update_manual_trim_label()
+        self._focus_sink()                   # trả focus về sink -> phím bay chạy tiếp
+
+    def _update_manual_trim_label(self):
+        if not hasattr(self, "manual_trim_var"):
+            return
+        self.manual_trim_var.set(
+            f"roll={self.trim_roll.get_value():+.2f}  "
+            f"pitch={self.trim_pitch.get_value():+.2f}")
+
     # ---- alt (W/S) — step cố định firmware ('>'/'<') ----
     def _alt_step(self, sign):
         self.send_raw_cmd(">" if sign > 0 else "<")
@@ -1506,6 +1557,10 @@ class PidTunerApp:
             self.root.bind(f"<KeyRelease-{ks}>", self._on_manual_keyrelease, add="+")
         for ks in ("space", "t", "T", "l", "L"):
             self.root.bind(f"<KeyPress-{ks}>", self._on_manual_keypress, add="+")
+        # Phím tắt trim: q/e (roll), 1/3 (pitch). Bind cả hoa/thường cho chữ.
+        for ks in ("q", "Q", "e", "E", "1", "3"):
+            self.root.bind(f"<KeyPress-{ks}>", self._on_trim_keypress, add="+")
+            self.root.bind(f"<KeyRelease-{ks}>", self._on_trim_keyrelease, add="+")
         self.root.bind("<FocusOut>", self._on_focus_out, add="+")
         self.root.bind("<Unmap>", self._on_unmap, add="+")
 
@@ -1543,6 +1598,22 @@ class PidTunerApp:
         if ks in self._keys_down:
             self._keys_down.discard(ks)
             self._key_release_action(ks)
+
+    # ---- phím tắt trim (q/e roll, 1/3 pitch) — độc lập hệ momentary bay ----
+    def _on_trim_keypress(self, e):
+        if not self._manual_active() or self._focus_is_entry():
+            return   # chỉ ở tab Manual; đang gõ spinbox thì để số 1/3 vào ô
+        ks = e.keysym.lower()
+        spec = self._TRIM_KEYS.get(ks)
+        if spec is None:
+            return
+        if ks in self._trim_keys_down:      # auto-repeat -> bỏ, 1 nhấn = 1 bước
+            return
+        self._trim_keys_down.add(ks)
+        self._trim_nudge(spec[0], spec[1])
+
+    def _on_trim_keyrelease(self, e):
+        self._trim_keys_down.discard(e.keysym.lower())
 
     def _key_press_action(self, ks):
         if ks in self.KEY_TO_DIR:
@@ -1924,6 +1995,7 @@ class PidTunerApp:
             self.trim_roll.set_value(float(r))
             self.trim_pitch.set_value(float(p))
             self.trim_status_var.set(f"OK roll={r} pitch={p}")
+            self._update_manual_trim_label()
             return
 
         if line.startswith("TRIM ERR"):
@@ -2041,10 +2113,15 @@ class PidTunerApp:
             if hasattr(self, "manual_status_var"):
                 mnames = {"0": "OFF", "1": "LOG", "2": "HOLD", "3": "TAKEOFF", "4": "LANDING"}
                 armed_yes = (armed == "1")
+                # THR= chính là throttle base: khi mode HOLD/TAKEOFF/LANDING (2/3/4)
+                # nó là output PID giữ độ cao (hover+dthr); còn lại là throttle tay.
+                thr_pid = amode in ("2", "3", "4")
+                thr_txt = f"{thr}{' (PID)' if thr_pid else ''}" if thr is not None else "?"
                 self.manual_status_var.set(
                     f"ARM={'YES' if armed_yes else 'no'}   "
                     f"mode={mnames.get(amode, amode) if amode is not None else '?'}   "
-                    f"alt={altm if altm is not None else '?'}m")
+                    f"alt={altm if altm is not None else '?'}m   "
+                    f"THR={thr_txt}")
                 self._update_manual_cmd_label()
                 # Takeoff chỉ enable khi đã ARM; Land luôn enable.
                 if hasattr(self, "manual_takeoff_btn"):
