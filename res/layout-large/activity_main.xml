@@ -99,49 +99,43 @@
 
     <!-- HEADER end -->
 
-    <ImageButton
-        android:id="@+id/button_ledRing"
+    <LinearLayout
+        android:id="@+id/uav_action_bar"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginLeft="6dp"
-        android:layout_marginRight="6dp"
-        android:layout_alignBottom="@+id/button_headLight"
-        android:layout_toLeftOf="@id/button_headLight"
-        android:layout_toStartOf="@id/button_headLight"
-        android:background="@drawable/custom_button_action"
-        android:src="@drawable/ic_led_ring"
-        android:elevation="2dp"
-        android:onClick="switchLedRingEffect"
-        android:contentDescription="@string/button_ledring_contentDescription"/>
-
-    <ImageButton
-        android:id="@+id/button_headLight"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginLeft="6dp"
-        android:layout_marginRight="6dp"
         android:layout_below="@+id/imageButton_settings"
         android:layout_centerHorizontal="true"
-        android:background="@drawable/custom_button_action"
-        android:src="@drawable/ic_headlight"
-        android:elevation="2dp"
-        android:onClick="toggleHeadlight"
-        android:contentDescription="@string/button_headlight_contentDescription"/>
+        android:orientation="horizontal">
 
-    <ImageButton
-        android:id="@+id/button_buzzerSound"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_marginLeft="6dp"
-        android:layout_marginRight="6dp"
-        android:layout_alignBottom="@+id/button_headLight"
-        android:layout_toRightOf="@id/button_headLight"
-        android:layout_toEndOf="@id/button_headLight"
-        android:background="@drawable/custom_button_action"
-        android:src="@drawable/ic_volume_up_black"
-        android:elevation="2dp"
-        android:onClick="playBuzzerSound"
-        android:contentDescription="@string/button_buzzer_contentDescription"/>
+        <Button
+            android:id="@+id/button_ledRing"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="armUav"
+            android:text="@string/uav_arm" />
+
+        <Button
+            android:id="@+id/button_headLight"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="killUav"
+            android:text="@string/uav_kill"
+            android:textColor="#B00020" />
+
+        <Button
+            android:id="@+id/button_buzzerSound"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="takeoffUav"
+            android:text="@string/uav_takeoff" />
+
+        <Button
+            android:id="@+id/button_land"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="landUav"
+            android:text="@string/uav_land" />
+    </LinearLayout>
 
     <se.bitcraze.crazyfliecontrol2.FlightDataView
         android:id="@+id/flightdataview"
@@ -149,7 +143,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
         android:layout_centerHorizontal="true"
-        android:layout_below="@+id/button_buzzerSound" />
+        android:layout_below="@+id/uav_action_bar" />
 
     <ScrollView
         android:id="@+id/console_scrollView"

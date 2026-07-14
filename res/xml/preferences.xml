@@ -4,6 +4,28 @@
     android:title="@string/preferences_title" >
 
     <!-- Connection settings -->
+    <PreferenceScreen
+        android:key="pref_udp_screen"
+        android:title="@string/preferences_udp_title">
+
+        <EditTextPreference
+            android:defaultValue="@string/preferences_udp_host_defaultValue"
+            android:dialogTitle="@string/preferences_udp_host"
+            android:inputType="textUri"
+            android:key="pref_udp_host"
+            android:summary="@string/preferences_udp_host_summary"
+            android:title="@string/preferences_udp_host" />
+
+        <EditTextPreference
+            android:defaultValue="@string/preferences_udp_port_defaultValue"
+            android:dialogTitle="@string/preferences_udp_port"
+            android:inputType="number"
+            android:maxLength="5"
+            android:key="pref_udp_port"
+            android:summary="@string/preferences_udp_port_summary"
+            android:title="@string/preferences_udp_port" />
+    </PreferenceScreen>
+
     <PreferenceScreen 
         android:key="pref_radio_screen"
         android:title="@string/preferences_radio_title">

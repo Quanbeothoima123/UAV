@@ -4,6 +4,7 @@ import android.util.Log;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Locale;
 import java.util.Map;
 
 import se.bitcraze.crazyflie.lib.crazyflie.ConnectionAdapter;
@@ -24,6 +25,7 @@ import se.bitcraze.crazyflie.lib.toc.VariableType;
 import se.bitcraze.crazyfliecontrol.ble.BleLink;
 import se.bitcraze.crazyfliecontrol.console.ConsoleListener;
 import se.bitcraze.crazyfliecontrol.controller.AbstractController;
+import se.bitcraze.crazyfliecontrol.controller.Controls;
 import se.bitcraze.crazyfliecontrol.controller.GamepadController;
 import se.bitcraze.crazyfliecontrol.controller.IController;
 
@@ -35,6 +37,7 @@ public class MainPresenter {
 
     private Crazyflie mCrazyflie;
     private CrtpDriver mDriver;
+    private UavUdpLink mUavUdpLink;
 
     private Logg mLogg;
     private LogConfig mDefaultLogConfig = null;
@@ -60,6 +63,47 @@ public class MainPresenter {
     public void onDestroy() {
         this.mainActivity = null;
     }
+
+    private final UavUdpLink.Listener uavUdpListener = new UavUdpLink.Listener() {
+        @Override
+        public void onConnected(String host, int port) {
+            if (mainActivity == null) {
+                return;
+            }
+            mainActivity.showToastie("UDP connected to " + host + ":" + port);
+            mainActivity.setConnectionButtonConnected();
+            mainActivity.setLinkQualityText("UDP");
+            mainActivity.setUavActionButtonsEnabled(true);
+            startUavControlThread();
+        }
+
+        @Override
+        public void onDisconnected() {
+            stopSendJoystickDataThread();
+            if (mainActivity == null) {
+                return;
+            }
+            mainActivity.showToastie("UDP disconnected");
+            mainActivity.setConnectionButtonDisconnected();
+            mainActivity.setUavActionButtonsEnabled(false);
+            mainActivity.setLinkQualityText("N/A");
+        }
+
+        @Override
+        public void onMessage(String line) {
+            if (mainActivity != null) {
+                mainActivity.appendToConsole(line);
+            }
+        }
+
+        @Override
+        public void onError(String message) {
+            if (mainActivity != null) {
+                mainActivity.appendToConsole("[UDP] " + message);
+                mainActivity.showToastie(message);
+            }
+        }
+    };
 
     private ConnectionAdapter crazyflieConnectionAdapter = new ConnectionAdapter() {
 
@@ -233,6 +277,89 @@ public class MainPresenter {
         mSendJoystickDataThread.start();
     }
 
+    /**
+     * Send the same text control protocol as uav_udp_console.py.
+     * Roll/pitch signs follow the Python manual-control convention:
+     * left/forward are positive joystick movements but roll right and pitch
+     * forward are negative setpoints in the ESP32 firmware.
+     */
+    private void startUavControlThread() {
+        stopSendJoystickDataThread();
+        mSendJoystickDataThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                float lastRoll = Float.NaN;
+                float lastPitch = Float.NaN;
+                float lastYaw = Float.NaN;
+                long lastSetpointTime = 0L;
+                long lastThrottleTime = 0L;
+
+                while (mainActivity != null && mUavUdpLink != null && mUavUdpLink.isConnected()) {
+                    IController controller = mainActivity.getController();
+                    if (controller == null) {
+                        break;
+                    }
+
+                    float roll = -controller.getRoll();
+                    float pitch = -controller.getPitch();
+                    float yaw = controller.getYaw();
+                    long now = System.currentTimeMillis();
+
+                    boolean changed = Float.isNaN(lastRoll)
+                            || Math.abs(roll - lastRoll) >= 0.01f
+                            || Math.abs(pitch - lastPitch) >= 0.01f
+                            || Math.abs(yaw - lastYaw) >= 0.01f;
+                    if (changed || now - lastSetpointTime >= 1000L) {
+                        sendUavCommand(String.format(Locale.US, "@SP SET %.2f %.2f %.2f", roll, pitch, yaw));
+                        lastRoll = roll;
+                        lastPitch = pitch;
+                        lastYaw = yaw;
+                        lastSetpointTime = now;
+                    }
+
+                    float throttleAxis = getUavThrottleAxis();
+                    float deadzone = mainActivity.getControls().getDeadzone();
+                    if (Math.abs(throttleAxis) > deadzone && now - lastThrottleTime >= 333L) {
+                        if (throttleAxis >= 0.75f) {
+                            sendUavCommand("+");
+                        } else if (throttleAxis > 0.0f) {
+                            sendUavCommand("]");
+                        } else if (throttleAxis <= -0.75f) {
+                            sendUavCommand("-");
+                        } else {
+                            sendUavCommand("[");
+                        }
+                        lastThrottleTime = now;
+                    }
+
+                    try {
+                        Thread.sleep(100L);
+                    } catch (InterruptedException e) {
+                        break;
+                    }
+                }
+            }
+        }, "uav-control");
+        mSendJoystickDataThread.start();
+    }
+
+    private float getUavThrottleAxis() {
+        if (mainActivity == null || mainActivity.getControls() == null) {
+            return 0.0f;
+        }
+        Controls controls = mainActivity.getControls();
+        return (controls.getMode() == 1 || controls.getMode() == 3)
+                ? controls.getRightAnalog_Y()
+                : controls.getLeftAnalog_Y();
+    }
+
+    private void stopSendJoystickDataThread() {
+        if (mSendJoystickDataThread != null) {
+            mSendJoystickDataThread.interrupt();
+            mSendJoystickDataThread = null;
+        }
+    }
+
     public void connectCrazyradio(int radioChannel, int radioDatarate, File mCacheDir) {
         Log.d(LOG_TAG, "connectCrazyradio()");
         // ensure previous link is disconnected
@@ -250,12 +377,19 @@ public class MainPresenter {
         connect(mCacheDir, new ConnectionData(radioChannel, radioDatarate));
     }
 
-    public void connectUDP(File cacheDir) {
-        Log.d(LOG_TAG, "connectUDP()");
+    public void connectUDP(String host, int port) {
+        Log.d(LOG_TAG, "connectUDP(" + host + ":" + port + ")");
         disconnect();
-        mDriver = null;
-        mDriver = new EspUdpDriver(mainActivity);
-        connect(cacheDir, null);
+        mUavUdpLink = new UavUdpLink(uavUdpListener);
+        try {
+            mUavUdpLink.connect(host, port);
+        } catch (IllegalArgumentException e) {
+            mainActivity.showToastie(e.getMessage());
+            mUavUdpLink = null;
+        } catch (IOException e) {
+            mainActivity.showToastie("Cannot open UDP link: " + e.getMessage());
+            mUavUdpLink = null;
+        }
     }
 
     public void connectBle(boolean writeWithResponse, File mCacheDir) {
@@ -292,10 +426,18 @@ public class MainPresenter {
 
     public void disconnect() {
         Log.d(LOG_TAG, "disconnect()");
-        // kill sendJoystickDataThread first to avoid NPE
-        if (mSendJoystickDataThread != null) {
-            mSendJoystickDataThread.interrupt();
-            mSendJoystickDataThread = null;
+        stopSendJoystickDataThread();
+
+        if (mUavUdpLink != null) {
+            if (mUavUdpLink.isConnected()) {
+                // Level attitude before closing the socket. Throttle/disarm is
+                // intentionally left to explicit STOP/KILL commands, matching
+                // the Python console's disconnect behaviour.
+                mUavUdpLink.sendCommand("@SP SET 0.00 0.00 0.00");
+            }
+            UavUdpLink link = mUavUdpLink;
+            mUavUdpLink = null;
+            link.disconnect();
         }
 
         if (mCrazyflie != null) {
@@ -310,6 +452,35 @@ public class MainPresenter {
 
         // link quality is not available when there is no active connection
         mainActivity.setLinkQualityText("N/A");
+    }
+
+    public boolean isConnected() {
+        return (mUavUdpLink != null && mUavUdpLink.isConnected())
+                || (mCrazyflie != null && mCrazyflie.isConnected());
+    }
+
+    public void sendUavCommand(String command) {
+        if (mUavUdpLink != null && mUavUdpLink.isConnected()) {
+            mUavUdpLink.sendCommand(command);
+        }
+    }
+
+    public void armUav() {
+        sendUavCommand("r");
+    }
+
+    public void killUav() {
+        sendUavCommand("@SP SET 0.00 0.00 0.00");
+        sendUavCommand("0");
+        sendUavCommand("k");
+    }
+
+    public void takeoffUav() {
+        sendUavCommand("@ALT TAKEOFF");
+    }
+
+    public void landUav() {
+        sendUavCommand("l");
     }
 
     public void enableAltHoldMode(boolean hover) {

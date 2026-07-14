@@ -68,6 +68,8 @@ public class PreferencesActivity extends PreferenceActivity {
 
     private static final String LOG_TAG = "PreferencesActivity";
 
+    public static final String KEY_PREF_UDP_HOST = "pref_udp_host";
+    public static final String KEY_PREF_UDP_PORT = "pref_udp_port";
     public static final String KEY_PREF_RADIO_CHANNEL = "pref_radiochannel";
     public static final String KEY_PREF_RADIO_DATARATE = "pref_radiodatarate";
     public static final String KEY_PREF_RADIO_SCAN = "pref_radio_scan";
@@ -135,6 +137,8 @@ public class PreferencesActivity extends PreferenceActivity {
         private SharedPreferences mSharedPreferences;
 
         private String mRadioChannelDefaultValue;
+        private String mUdpHostDefaultValue;
+        private String mUdpPortDefaultValue;
         private String mDeadzoneDefaultValue;
         private String mMaxRollPitchAngleDefaultValue;
         private String mMaxYawAngleDefaultValue;
@@ -209,6 +213,8 @@ public class PreferencesActivity extends PreferenceActivity {
          */
         private void setInitialSummaries() {
             // Connection settings
+            mUdpHostDefaultValue = setInitialSummaryAndReturnDefaultValue(KEY_PREF_UDP_HOST, R.string.preferences_udp_host_defaultValue);
+            mUdpPortDefaultValue = setInitialSummaryAndReturnDefaultValue(KEY_PREF_UDP_PORT, R.string.preferences_udp_port_defaultValue);
             mRadioChannelDefaultValue = setInitialSummaryAndReturnDefaultValue(KEY_PREF_RADIO_CHANNEL, R.string.preferences_radio_channel_defaultValue);
             setSummaryArray(KEY_PREF_RADIO_DATARATE, R.string.preferences_radio_datarate_defaultValue, R.array.radioDatarateEntries, 0);
             findPreference(KEY_PREF_RADIO_SCAN).setOnPreferenceClickListener(new OnPreferenceClickListener() {
@@ -377,6 +383,12 @@ public class PreferencesActivity extends PreferenceActivity {
         // Set summary to be the user-description for the selected value
         public void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key) {
             // Connection settings
+            if (key.equals(KEY_PREF_UDP_HOST)) {
+                findPreference(key).setSummary(sharedPreferences.getString(key, mUdpHostDefaultValue));
+            }
+            if (key.equals(KEY_PREF_UDP_PORT)) {
+                findPreference(key).setSummary(sharedPreferences.getString(key, mUdpPortDefaultValue));
+            }
             if (key.equals(KEY_PREF_RADIO_CHANNEL)) {
                 setSummaryInt(key, mRadioChannelDefaultValue, RADIOCHANNEL_UPPER_LIMIT, "Radio channel");
             }

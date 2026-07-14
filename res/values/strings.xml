@@ -21,8 +21,19 @@
     <string name="button_ledring_contentDescription">LED ring button</string>
     <string name="button_headlight_contentDescription">Headlight button</string>
     <string name="button_buzzer_contentDescription">Buzzer button</string>
+    <string name="uav_arm">ARM</string>
+    <string name="uav_kill">KILL</string>
+    <string name="uav_takeoff">TAKEOFF</string>
+    <string name="uav_land">LAND</string>
 
     <!-- Connection settings -->
+    <string name="preferences_udp_title">ESP32 Wi-Fi connection</string>
+    <string name="preferences_udp_host">ESP32 IP address</string>
+    <string name="preferences_udp_host_summary">IP of the ESP32 on the shared Wi-Fi network</string>
+    <string name="preferences_udp_host_defaultValue">192.168.1.19</string>
+    <string name="preferences_udp_port">ESP32 UDP port</string>
+    <string name="preferences_udp_port_summary">UDP command port used by the ESP32 firmware</string>
+    <string name="preferences_udp_port_defaultValue">4210</string>
     <string name="preferences_radio_title">Connection settings</string>
     <string name="preferences_category_radio">Crazyradio settings</string>
     <string name="preferences_radio_channel">Radio channel</string>
@@ -52,9 +63,9 @@
     <string name="preferences_advancedflightcontrol">Advanced flight control</string>
     <string name="preferences_afc_title">Advanced flight control preferences</string>
     <string name="preferences_maxRollPitchAngle_title">Max roll/pitch angle</string>
-    <string name="preferences_maxRollPitchAngle_defaultValue">15</string>
+    <string name="preferences_maxRollPitchAngle_defaultValue">4</string>
     <string name="preferences_maxYawAngle_title">Max yaw angle</string>
-    <string name="preferences_maxYawAngle_defaultValue">90</string>
+    <string name="preferences_maxYawAngle_defaultValue">30</string>
     <string name="preferences_maxThrust_title">Max thrust (%)</string>
     <string name="preferences_maxThrust_defaultValue">90</string>
     <string name="preferences_minThrust_title">Min thrust (%)</string>

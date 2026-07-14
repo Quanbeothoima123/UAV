@@ -59,6 +59,8 @@ import android.location.LocationManager;
 import android.media.AudioManager;
 import android.media.SoundPool;
 import android.media.SoundPool.OnLoadCompleteListener;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -76,6 +78,7 @@ import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
 import android.widget.AdapterView;
+import android.widget.Button;
 import android.widget.ImageButton;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -113,9 +116,10 @@ public class MainActivity extends EspActivity {
     private int mSoundDisconnect;
 
     private ImageButton mToggleConnectButton;
-    private ImageButton mRingEffectButton;
-    private ImageButton mHeadlightButton;
-    private ImageButton mBuzzerSoundButton;
+    private Button mRingEffectButton;
+    private Button mHeadlightButton;
+    private Button mBuzzerSoundButton;
+    private Button mLandButton;
     private File mCacheDir;
 
     private TextView mTextView_battery;
@@ -171,9 +175,10 @@ public class MainActivity extends EspActivity {
         registerForContextMenu(mConsoleTextView);
 
         //action buttons
-        mRingEffectButton = (ImageButton) findViewById(R.id.button_ledRing);
-        mHeadlightButton = (ImageButton) findViewById(R.id.button_headLight);
-        mBuzzerSoundButton = (ImageButton) findViewById(R.id.button_buzzerSound);
+        mRingEffectButton = (Button) findViewById(R.id.button_ledRing);
+        mHeadlightButton = (Button) findViewById(R.id.button_headLight);
+        mBuzzerSoundButton = (Button) findViewById(R.id.button_buzzerSound);
+        mLandButton = (Button) findViewById(R.id.button_land);
 
         IntentFilter filter = new IntentFilter();
         filter.addAction(this.getPackageName()+".USB_PERMISSION");
@@ -254,15 +259,10 @@ public class MainActivity extends EspActivity {
             public void onClick(View v) {
 
                 try {
-                    if (mPresenter != null && mPresenter.getCrazyflie() != null && mPresenter.getCrazyflie().isConnected()) {
+                    if (mPresenter != null && mPresenter.isConnected()) {
                         mPresenter.disconnect();
                     } else {
-                        // TODO: FIXME
-                        if(isCrazyradioAvailable(MainActivity.this)) {
-                            connectCrazyradio();
-                        } else {
-                            connectBlePreChecks();
-                        }
+                        connectUDP();
                     }
                 } catch (IllegalStateException e) {
                     Toast.makeText(MainActivity.this, e.getMessage(), Toast.LENGTH_SHORT).show();
@@ -321,7 +321,29 @@ public class MainActivity extends EspActivity {
     }
 
     private void connectUDP() {
-        mPresenter.connectUDP(mCacheDir);
+        ConnectivityManager connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        NetworkInfo activeNetwork = connectivityManager == null ? null : connectivityManager.getActiveNetworkInfo();
+        if (activeNetwork == null || !activeNetwork.isConnected()
+                || activeNetwork.getType() != ConnectivityManager.TYPE_WIFI) {
+            Toast.makeText(this, "Connect this phone to the same Wi-Fi as the ESP32 first.", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        String defaultHost = getString(R.string.preferences_udp_host_defaultValue);
+        String defaultPort = getString(R.string.preferences_udp_port_defaultValue);
+        String host = mPreferences.getString(PreferencesActivity.KEY_PREF_UDP_HOST, defaultHost).trim();
+        String portValue = mPreferences.getString(PreferencesActivity.KEY_PREF_UDP_PORT, defaultPort).trim();
+        try {
+            int port = Integer.parseInt(portValue);
+            if (mControls.isTouchThrustFullTravel()) {
+                Toast.makeText(this,
+                        "For UDP throttle up/down, disable 'Use full travel for thrust' in Controller settings.",
+                        Toast.LENGTH_LONG).show();
+            }
+            mPresenter.connectUDP(host, port);
+        } catch (NumberFormatException e) {
+            Toast.makeText(this, "Invalid ESP32 UDP port: " + portValue, Toast.LENGTH_LONG).show();
+        }
     }
 
     private void checkLocationSettings() {
@@ -402,6 +424,7 @@ public class MainActivity extends EspActivity {
         mRingEffectButton.setEnabled(false);
         mHeadlightButton.setEnabled(false);
         mBuzzerSoundButton.setEnabled(false);
+        mLandButton.setEnabled(false);
         if (mPreferences.getBoolean(PreferencesActivity.KEY_PREF_IMMERSIVE_MODE_BOOL, false)) {
             setHideyBar();
         }
@@ -667,6 +690,41 @@ public class MainActivity extends EspActivity {
         }
     }
 
+    public void armUav(View view) {
+        if (mPresenter == null || !mPresenter.isConnected()) {
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("ARM")
+                .setMessage("Motors will be enabled. Remove the propellers or secure the frame before testing. Continue?")
+                .setPositiveButton(android.R.string.yes, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        mPresenter.armUav();
+                    }
+                })
+                .setNegativeButton(android.R.string.no, null)
+                .show();
+    }
+
+    public void killUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.killUav();
+        }
+    }
+
+    public void takeoffUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.takeoffUav();
+        }
+    }
+
+    public void landUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.landUav();
+        }
+    }
+
     public MainPresenter getPresenter() {
         return mPresenter;
     }
@@ -782,7 +840,19 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mHeadlightButton.setColorFilter(toggle ? Color.parseColor("#00FF00") : Color.BLACK);
+                mHeadlightButton.setTextColor(toggle ? Color.parseColor("#00AA00") : Color.BLACK);
+            }
+        });
+    }
+
+    public void setUavActionButtonsEnabled(final boolean enabled) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                mRingEffectButton.setEnabled(enabled);
+                mHeadlightButton.setEnabled(enabled);
+                mBuzzerSoundButton.setEnabled(enabled);
+                mLandButton.setEnabled(enabled);
             }
         });
     }
@@ -791,6 +861,9 @@ public class MainActivity extends EspActivity {
         setRingEffectButtonEnablement(false);
         setHeadlightButtonEnablement(false);
         setBuzzerSoundButtonEnablement(false);
+        if (mLandButton != null) {
+            mLandButton.setEnabled(false);
+        }
         setBatteryLevel(-1.0f);
     }
 }

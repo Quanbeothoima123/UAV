@@ -5,7 +5,7 @@ buildscript {
         google()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:4.0.0'
+        classpath 'com.android.tools.build:gradle:8.1.1'
     }
 }
 allprojects {
@@ -18,8 +18,9 @@ allprojects {
 apply plugin: 'com.android.application'
 
 android {
+    namespace 'com.espressif.espdrone.android'
 
-    compileSdkVersion 28
+    compileSdkVersion 34
 
     useLibrary 'org.apache.http.legacy'
 
@@ -52,7 +53,7 @@ android {
         }
     }
 
-    lintOptions {
+    lint {
         abortOnError false
     }
 
