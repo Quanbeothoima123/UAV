@@ -35,6 +35,7 @@ public class UavUdpLink {
     private final Object mSendLock = new Object();
 
     private volatile boolean mRunning;
+    private volatile boolean mCancelled;
     private volatile DatagramSocket mSocket;
     private volatile InetAddress mDeviceAddress;
     private volatile int mDevicePort;
@@ -46,6 +47,9 @@ public class UavUdpLink {
     }
 
     public synchronized void connect(String host, int port) throws IOException {
+        if (mCancelled) {
+            throw new IOException("Connection cancelled");
+        }
         if (mRunning) {
             throw new IllegalStateException("UDP link is already connected");
         }
@@ -57,8 +61,16 @@ public class UavUdpLink {
         }
 
         mDeviceAddress = InetAddress.getByName(host.trim());
+        if (mCancelled) {
+            throw new IOException("Connection cancelled");
+        }
         mDevicePort = port;
         mSocket = new DatagramSocket();
+        if (mCancelled) {
+            mSocket.close();
+            mSocket = null;
+            throw new IOException("Connection cancelled");
+        }
         mSocket.setSoTimeout(RECEIVE_TIMEOUT_MS);
         mRunning = true;
 
@@ -99,6 +111,7 @@ public class UavUdpLink {
     }
 
     public synchronized void disconnect() {
+        mCancelled = true;
         boolean notify = mRunning || mSocket != null;
         mRunning = false;
 

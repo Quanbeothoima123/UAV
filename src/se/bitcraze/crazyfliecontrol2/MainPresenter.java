@@ -38,6 +38,7 @@ public class MainPresenter {
     private Crazyflie mCrazyflie;
     private CrtpDriver mDriver;
     private UavUdpLink mUavUdpLink;
+    private volatile boolean mUavUdpConnecting;
 
     private Logg mLogg;
     private LogConfig mDefaultLogConfig = null;
@@ -67,6 +68,7 @@ public class MainPresenter {
     private final UavUdpLink.Listener uavUdpListener = new UavUdpLink.Listener() {
         @Override
         public void onConnected(String host, int port) {
+            mUavUdpConnecting = false;
             if (mainActivity == null) {
                 return;
             }
@@ -79,6 +81,7 @@ public class MainPresenter {
 
         @Override
         public void onDisconnected() {
+            mUavUdpConnecting = false;
             stopSendJoystickDataThread();
             if (mainActivity == null) {
                 return;
@@ -98,6 +101,7 @@ public class MainPresenter {
 
         @Override
         public void onError(String message) {
+            mUavUdpConnecting = false;
             if (mainActivity != null) {
                 mainActivity.appendToConsole("[UDP] " + message);
                 mainActivity.showToastie(message);
@@ -380,15 +384,45 @@ public class MainPresenter {
     public void connectUDP(String host, int port) {
         Log.d(LOG_TAG, "connectUDP(" + host + ":" + port + ")");
         disconnect();
-        mUavUdpLink = new UavUdpLink(uavUdpListener);
-        try {
-            mUavUdpLink.connect(host, port);
-        } catch (IllegalArgumentException e) {
-            mainActivity.showToastie(e.getMessage());
+        final UavUdpLink link = new UavUdpLink(uavUdpListener);
+        final String targetHost = host;
+        final int targetPort = port;
+        mUavUdpLink = link;
+        mUavUdpConnecting = true;
+        mainActivity.showToastie("Opening UDP to " + targetHost + ":" + targetPort + " ...");
+
+        // DNS lookup, socket creation and the first datagram must not run on
+        // Android's UI thread (NetworkOnMainThreadException on real devices).
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (mUavUdpLink != link) {
+                        return;
+                    }
+                    link.connect(targetHost, targetPort);
+                } catch (IllegalArgumentException e) {
+                    handleUavConnectFailure(link, e.getMessage());
+                } catch (IOException e) {
+                    handleUavConnectFailure(link, "Cannot open UDP link: " + e.getMessage());
+                } catch (RuntimeException e) {
+                    handleUavConnectFailure(link, "UDP connection failed: " + e.getMessage());
+                }
+            }
+        }, "uav-udp-connect").start();
+    }
+
+    private void handleUavConnectFailure(UavUdpLink link, String message) {
+        mUavUdpConnecting = false;
+        if (mUavUdpLink == link) {
             mUavUdpLink = null;
-        } catch (IOException e) {
-            mainActivity.showToastie("Cannot open UDP link: " + e.getMessage());
-            mUavUdpLink = null;
+        }
+        link.disconnect();
+        if (mainActivity != null) {
+            mainActivity.showToastie(message == null ? "UDP connection failed" : message);
+            mainActivity.setConnectionButtonDisconnected();
+            mainActivity.setUavActionButtonsEnabled(false);
+            mainActivity.setLinkQualityText("N/A");
         }
     }
 
@@ -426,6 +460,7 @@ public class MainPresenter {
 
     public void disconnect() {
         Log.d(LOG_TAG, "disconnect()");
+        mUavUdpConnecting = false;
         stopSendJoystickDataThread();
 
         if (mUavUdpLink != null) {
@@ -455,7 +490,8 @@ public class MainPresenter {
     }
 
     public boolean isConnected() {
-        return (mUavUdpLink != null && mUavUdpLink.isConnected())
+        return mUavUdpConnecting
+                || (mUavUdpLink != null && mUavUdpLink.isConnected())
                 || (mCrazyflie != null && mCrazyflie.isConnected());
     }
 
