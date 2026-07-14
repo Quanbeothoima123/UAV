@@ -563,26 +563,6 @@ public class MainPresenter {
         sendUavCommand("l");
     }
 
-    public void throttleUpFastUav() {
-        sendUavCommand("+");
-    }
-
-    public void throttleUpUav() {
-        sendUavCommand("]");
-    }
-
-    public void throttleStopUav() {
-        sendUavCommand("0");
-    }
-
-    public void throttleDownUav() {
-        sendUavCommand("[");
-    }
-
-    public void throttleDownFastUav() {
-        sendUavCommand("-");
-    }
-
     public void enableAltHoldMode(boolean hover) {
         // For safety reasons, altHold mode is only supported when the Crazyradio and a game pad are used
         if (mCrazyflie != null && mCrazyflie.getDriver() instanceof RadioDriver && mainActivity.getController() instanceof GamepadController) {

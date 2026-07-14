@@ -26,12 +26,6 @@
     <string name="uav_kill">KILL</string>
     <string name="uav_takeoff">TAKEOFF</string>
     <string name="uav_land">LAND</string>
-    <string name="uav_throttle_up_fast">THR +20</string>
-    <string name="uav_throttle_up">THR +5</string>
-    <string name="uav_throttle_stop">THR 0</string>
-    <string name="uav_throttle_down">THR -5</string>
-    <string name="uav_throttle_down_fast">THR -20</string>
-
     <!-- Connection settings -->
     <string name="preferences_udp_title">ESP32 Wi-Fi connection</string>
     <string name="preferences_udp_host">ESP32 IP address</string>
