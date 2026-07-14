@@ -21,10 +21,16 @@
     <string name="button_ledring_contentDescription">LED ring button</string>
     <string name="button_headlight_contentDescription">Headlight button</string>
     <string name="button_buzzer_contentDescription">Buzzer button</string>
+    <string name="uav_flight">FLIGHT</string>
     <string name="uav_arm">ARM</string>
     <string name="uav_kill">KILL</string>
     <string name="uav_takeoff">TAKEOFF</string>
     <string name="uav_land">LAND</string>
+    <string name="uav_throttle_up_fast">THR +20</string>
+    <string name="uav_throttle_up">THR +5</string>
+    <string name="uav_throttle_stop">THR 0</string>
+    <string name="uav_throttle_down">THR -5</string>
+    <string name="uav_throttle_down_fast">THR -20</string>
 
     <!-- Connection settings -->
     <string name="preferences_udp_title">ESP32 Wi-Fi connection</string>

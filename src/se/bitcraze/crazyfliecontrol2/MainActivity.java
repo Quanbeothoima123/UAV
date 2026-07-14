@@ -116,10 +116,16 @@ public class MainActivity extends EspActivity {
     private int mSoundDisconnect;
 
     private ImageButton mToggleConnectButton;
+    private Button mFlightModeButton;
     private Button mRingEffectButton;
     private Button mHeadlightButton;
     private Button mBuzzerSoundButton;
     private Button mLandButton;
+    private Button mThrottleUpFastButton;
+    private Button mThrottleUpButton;
+    private Button mThrottleStopButton;
+    private Button mThrottleDownButton;
+    private Button mThrottleDownFastButton;
     private File mCacheDir;
 
     private TextView mTextView_battery;
@@ -175,10 +181,16 @@ public class MainActivity extends EspActivity {
         registerForContextMenu(mConsoleTextView);
 
         //action buttons
+        mFlightModeButton = (Button) findViewById(R.id.button_flight_mode);
         mRingEffectButton = (Button) findViewById(R.id.button_ledRing);
         mHeadlightButton = (Button) findViewById(R.id.button_headLight);
         mBuzzerSoundButton = (Button) findViewById(R.id.button_buzzerSound);
         mLandButton = (Button) findViewById(R.id.button_land);
+        mThrottleUpFastButton = (Button) findViewById(R.id.button_throttle_up_fast);
+        mThrottleUpButton = (Button) findViewById(R.id.button_throttle_up);
+        mThrottleStopButton = (Button) findViewById(R.id.button_throttle_stop);
+        mThrottleDownButton = (Button) findViewById(R.id.button_throttle_down);
+        mThrottleDownFastButton = (Button) findViewById(R.id.button_throttle_down_fast);
 
         IntentFilter filter = new IntentFilter();
         filter.addAction(this.getPackageName()+".USB_PERMISSION");
@@ -421,10 +433,16 @@ public class MainActivity extends EspActivity {
         checkScreenLock();
         checkConsole();
         //disable action buttons
+        mFlightModeButton.setEnabled(false);
         mRingEffectButton.setEnabled(false);
         mHeadlightButton.setEnabled(false);
         mBuzzerSoundButton.setEnabled(false);
         mLandButton.setEnabled(false);
+        mThrottleUpFastButton.setEnabled(false);
+        mThrottleUpButton.setEnabled(false);
+        mThrottleStopButton.setEnabled(false);
+        mThrottleDownButton.setEnabled(false);
+        mThrottleDownFastButton.setEnabled(false);
         if (mPreferences.getBoolean(PreferencesActivity.KEY_PREF_IMMERSIVE_MODE_BOOL, false)) {
             setHideyBar();
         }
@@ -707,6 +725,12 @@ public class MainActivity extends EspActivity {
                 .show();
     }
 
+    public void enterFlightModeUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.enterFlightModeUav();
+        }
+    }
+
     public void killUav(View view) {
         if (mPresenter != null) {
             mPresenter.killUav();
@@ -722,6 +746,36 @@ public class MainActivity extends EspActivity {
     public void landUav(View view) {
         if (mPresenter != null) {
             mPresenter.landUav();
+        }
+    }
+
+    public void throttleUpFastUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.throttleUpFastUav();
+        }
+    }
+
+    public void throttleUpUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.throttleUpUav();
+        }
+    }
+
+    public void throttleStopUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.throttleStopUav();
+        }
+    }
+
+    public void throttleDownUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.throttleDownUav();
+        }
+    }
+
+    public void throttleDownFastUav(View view) {
+        if (mPresenter != null) {
+            mPresenter.throttleDownFastUav();
         }
     }
 
@@ -849,10 +903,16 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
+                mFlightModeButton.setEnabled(enabled);
                 mRingEffectButton.setEnabled(enabled);
                 mHeadlightButton.setEnabled(enabled);
                 mBuzzerSoundButton.setEnabled(enabled);
                 mLandButton.setEnabled(enabled);
+                mThrottleUpFastButton.setEnabled(enabled);
+                mThrottleUpButton.setEnabled(enabled);
+                mThrottleStopButton.setEnabled(enabled);
+                mThrottleDownButton.setEnabled(enabled);
+                mThrottleDownFastButton.setEnabled(enabled);
             }
         });
     }
@@ -863,6 +923,14 @@ public class MainActivity extends EspActivity {
         setBuzzerSoundButtonEnablement(false);
         if (mLandButton != null) {
             mLandButton.setEnabled(false);
+        }
+        if (mFlightModeButton != null) {
+            mFlightModeButton.setEnabled(false);
+            mThrottleUpFastButton.setEnabled(false);
+            mThrottleUpButton.setEnabled(false);
+            mThrottleStopButton.setEnabled(false);
+            mThrottleDownButton.setEnabled(false);
+            mThrottleDownFastButton.setEnabled(false);
         }
         setBatteryLevel(-1.0f);
     }

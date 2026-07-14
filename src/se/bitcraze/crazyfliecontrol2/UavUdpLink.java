@@ -9,6 +9,8 @@ import java.net.InetAddress;
 import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.nio.charset.Charset;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 
 /**
  * UDP text link used by the ESP32 firmware controlled by uav_udp_console.py.
@@ -23,6 +25,7 @@ public class UavUdpLink {
     private static final int RECEIVE_TIMEOUT_MS = 500;
     private static final int KEEPALIVE_INTERVAL_MS = 5000;
     private static final Charset UTF_8 = Charset.forName("UTF-8");
+    private static final byte[] STOP_SENDER = new byte[0];
 
     public interface Listener {
         void onConnected(String host, int port);
@@ -33,14 +36,17 @@ public class UavUdpLink {
 
     private final Listener mListener;
     private final Object mSendLock = new Object();
+    private final BlockingQueue<byte[]> mSendQueue = new LinkedBlockingQueue<>();
 
     private volatile boolean mRunning;
     private volatile boolean mCancelled;
+    private volatile boolean mDisconnecting;
     private volatile DatagramSocket mSocket;
     private volatile InetAddress mDeviceAddress;
     private volatile int mDevicePort;
     private Thread mReceiveThread;
     private Thread mKeepaliveThread;
+    private Thread mSendThread;
 
     public UavUdpLink(Listener listener) {
         mListener = listener;
@@ -74,6 +80,14 @@ public class UavUdpLink {
         mSocket.setSoTimeout(RECEIVE_TIMEOUT_MS);
         mRunning = true;
 
+        mSendThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                sendLoop();
+            }
+        }, "uav-udp-send");
+        mSendThread.start();
+
         mReceiveThread = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -92,7 +106,7 @@ public class UavUdpLink {
 
         // Same initial packet as UavUdpConsole.start(): allocate a local source
         // port and allow the ESP32 firmware to learn the phone as its peer.
-        sendRaw(new byte[]{'\n'});
+        enqueue(new byte[]{'\n'});
         if (mListener != null) {
             mListener.onConnected(mDeviceAddress.getHostAddress(), mDevicePort);
         }
@@ -107,13 +121,66 @@ public class UavUdpLink {
         if (command == null || !isConnected()) {
             return;
         }
-        sendRaw((command + "\n").getBytes(UTF_8));
+        enqueue((command + "\n").getBytes(UTF_8));
     }
 
+    /**
+     * Stop the link without doing network I/O on the caller (usually UI)
+     * thread. As in the Python console, disconnect does not send a command.
+     */
     public synchronized void disconnect() {
+        if (mDisconnecting) {
+            return;
+        }
+        mDisconnecting = true;
         mCancelled = true;
-        boolean notify = mRunning || mSocket != null;
+        final boolean notify = mRunning || mSocket != null;
+
         mRunning = false;
+
+        if (mKeepaliveThread != null) {
+            mKeepaliveThread.interrupt();
+        }
+        if (mSendThread != null) {
+            mSendQueue.offer(STOP_SENDER);
+        }
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                finishDisconnect(notify);
+            }
+        }, "uav-udp-disconnect").start();
+    }
+
+    private void enqueue(byte[] data) {
+        mSendQueue.offer(data);
+    }
+
+    private void sendLoop() {
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                byte[] data = mSendQueue.take();
+                if (data == STOP_SENDER) {
+                    break;
+                }
+                sendRaw(data);
+            } catch (InterruptedException e) {
+                break;
+            }
+        }
+        Log.d(TAG, "Send thread stopped");
+    }
+
+    private void finishDisconnect(boolean notify) {
+        Thread sender = mSendThread;
+        if (sender != null && sender != Thread.currentThread()) {
+            try {
+                sender.join(500L);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        }
 
         DatagramSocket socket = mSocket;
         mSocket = null;
@@ -122,12 +189,12 @@ public class UavUdpLink {
         }
         if (mReceiveThread != null) {
             mReceiveThread.interrupt();
-            mReceiveThread = null;
         }
-        if (mKeepaliveThread != null) {
-            mKeepaliveThread.interrupt();
-            mKeepaliveThread = null;
-        }
+
+        mReceiveThread = null;
+        mKeepaliveThread = null;
+        mSendThread = null;
+        mSendQueue.clear();
 
         if (notify && mListener != null) {
             mListener.onDisconnected();
@@ -137,7 +204,7 @@ public class UavUdpLink {
     private void sendRaw(byte[] data) {
         DatagramSocket socket = mSocket;
         InetAddress address = mDeviceAddress;
-        if (!mRunning || socket == null || socket.isClosed() || address == null) {
+        if (socket == null || socket.isClosed() || address == null) {
             return;
         }
         try {
@@ -197,7 +264,7 @@ public class UavUdpLink {
                 break;
             }
             if (mRunning) {
-                sendRaw(new byte[]{'\n'});
+                enqueue(new byte[]{'\n'});
             }
         }
         Log.d(TAG, "Keepalive thread stopped");

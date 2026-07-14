@@ -77,6 +77,7 @@ public class MainPresenter {
             mainActivity.setLinkQualityText("UDP");
             mainActivity.setUavActionButtonsEnabled(true);
             startUavControlThread();
+            requestUavConfigurationSnapshot();
         }
 
         @Override
@@ -296,7 +297,7 @@ public class MainPresenter {
                 float lastPitch = Float.NaN;
                 float lastYaw = Float.NaN;
                 long lastSetpointTime = 0L;
-                long lastThrottleTime = 0L;
+                String lastThrottleCommand = null;
 
                 while (mainActivity != null && mUavUdpLink != null && mUavUdpLink.isConnected()) {
                     IController controller = mainActivity.getController();
@@ -323,17 +324,27 @@ public class MainPresenter {
 
                     float throttleAxis = getUavThrottleAxis();
                     float deadzone = mainActivity.getControls().getDeadzone();
-                    if (Math.abs(throttleAxis) > deadzone && now - lastThrottleTime >= 333L) {
+                    String throttleCommand = null;
+                    if (Math.abs(throttleAxis) > deadzone) {
                         if (throttleAxis >= 0.75f) {
-                            sendUavCommand("+");
+                            throttleCommand = "+";
                         } else if (throttleAxis > 0.0f) {
-                            sendUavCommand("]");
+                            throttleCommand = "]";
                         } else if (throttleAxis <= -0.75f) {
-                            sendUavCommand("-");
+                            throttleCommand = "-";
                         } else {
-                            sendUavCommand("[");
+                            throttleCommand = "[";
                         }
-                        lastThrottleTime = now;
+                    }
+
+                    // The Python console sends one throttle command per button
+                    // press. Treat each new stick deflection as one press too;
+                    // returning to centre re-arms the next command.
+                    if (throttleCommand == null) {
+                        lastThrottleCommand = null;
+                    } else if (!throttleCommand.equals(lastThrottleCommand)) {
+                        sendUavCommand(throttleCommand);
+                        lastThrottleCommand = throttleCommand;
                     }
 
                     try {
@@ -355,6 +366,39 @@ public class MainPresenter {
         return (controls.getMode() == 1 || controls.getMode() == 3)
                 ? controls.getRightAnalog_Y()
                 : controls.getLeftAnalog_Y();
+    }
+
+    /**
+     * Match the read-only configuration requests scheduled by the Python GUI
+     * immediately after opening its UDP connection.
+     */
+    private void requestUavConfigurationSnapshot() {
+        final UavUdpLink link = mUavUdpLink;
+        if (link == null) {
+            return;
+        }
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                String[] commands = {
+                        "@PID GET", "@MAH GET", "@SP GET", "@TRIM GET",
+                        "@ALT GET", "@TKO GET", "@LAND GET"
+                };
+                long[] delaysMs = {300L, 100L, 100L, 50L, 50L, 100L, 100L};
+                for (int i = 0; i < commands.length; i++) {
+                    try {
+                        Thread.sleep(delaysMs[i]);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    if (mUavUdpLink != link || !link.isConnected()) {
+                        return;
+                    }
+                    link.sendCommand(commands[i]);
+                }
+            }
+        }, "uav-config-get").start();
     }
 
     private void stopSendJoystickDataThread() {
@@ -464,14 +508,10 @@ public class MainPresenter {
         stopSendJoystickDataThread();
 
         if (mUavUdpLink != null) {
-            if (mUavUdpLink.isConnected()) {
-                // Level attitude before closing the socket. Throttle/disarm is
-                // intentionally left to explicit STOP/KILL commands, matching
-                // the Python console's disconnect behaviour.
-                mUavUdpLink.sendCommand("@SP SET 0.00 0.00 0.00");
-            }
             UavUdpLink link = mUavUdpLink;
             mUavUdpLink = null;
+            // Match UavUdpConsole.disconnect(): close the socket without
+            // injecting an additional flight command.
             link.disconnect();
         }
 
@@ -502,12 +542,16 @@ public class MainPresenter {
     }
 
     public void armUav() {
+        // Python ARM sends only 'r'. Entering flight mode ('f') remains a
+        // separate explicit action via the FLIGHT button.
         sendUavCommand("r");
     }
 
+    public void enterFlightModeUav() {
+        sendUavCommand("f");
+    }
+
     public void killUav() {
-        sendUavCommand("@SP SET 0.00 0.00 0.00");
-        sendUavCommand("0");
         sendUavCommand("k");
     }
 
@@ -517,6 +561,26 @@ public class MainPresenter {
 
     public void landUav() {
         sendUavCommand("l");
+    }
+
+    public void throttleUpFastUav() {
+        sendUavCommand("+");
+    }
+
+    public void throttleUpUav() {
+        sendUavCommand("]");
+    }
+
+    public void throttleStopUav() {
+        sendUavCommand("0");
+    }
+
+    public void throttleDownUav() {
+        sendUavCommand("[");
+    }
+
+    public void throttleDownFastUav() {
+        sendUavCommand("-");
     }
 
     public void enableAltHoldMode(boolean hover) {

@@ -106,6 +106,13 @@
         android:orientation="horizontal">
 
         <Button
+            android:id="@+id/button_flight_mode"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="enterFlightModeUav"
+            android:text="@string/uav_flight" />
+
+        <Button
             android:id="@+id/button_ledRing"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -135,11 +142,55 @@
             android:text="@string/uav_land" />
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/uav_throttle_bar"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_below="@+id/uav_action_bar"
+        android:layout_centerHorizontal="true"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/button_throttle_up_fast"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="throttleUpFastUav"
+            android:text="@string/uav_throttle_up_fast" />
+
+        <Button
+            android:id="@+id/button_throttle_up"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="throttleUpUav"
+            android:text="@string/uav_throttle_up" />
+
+        <Button
+            android:id="@+id/button_throttle_stop"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="throttleStopUav"
+            android:text="@string/uav_throttle_stop" />
+
+        <Button
+            android:id="@+id/button_throttle_down"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="throttleDownUav"
+            android:text="@string/uav_throttle_down" />
+
+        <Button
+            android:id="@+id/button_throttle_down_fast"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:onClick="throttleDownFastUav"
+            android:text="@string/uav_throttle_down_fast" />
+    </LinearLayout>
+
     <se.bitcraze.crazyfliecontrol2.FlightDataView
         android:id="@+id/flightdataview"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_below="@+id/uav_action_bar"
+        android:layout_below="@+id/uav_throttle_bar"
         android:layout_centerHorizontal="true"
         android:layout_marginTop="10dp" />
 

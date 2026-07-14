@@ -61,6 +61,8 @@ public class TouchController extends AbstractController {
         this.mJoystickViewLeft.autoReturn(true);
         this.mJoystickViewRight.setAutoReturnMode(isRightAnalogFullTravelThrust() ? JoystickView.AUTO_RETURN_BOTTOM : JoystickView.AUTO_RETURN_CENTER);
         this.mJoystickViewRight.autoReturn(true);
+        this.mJoystickViewLeft.setCardinalDirectionsOnly(isYawAndThrustLeftAnalog());
+        this.mJoystickViewRight.setCardinalDirectionsOnly(isYawAndThrustRightAnalog());
     }
 
     @Override
@@ -90,7 +92,16 @@ public class TouchController extends AbstractController {
 
         @Override
         public void OnMoved(float pan, float tilt) {
-            if (isRightAnalogFullTravelThrust()) {
+            boolean horizontalDirection = false;
+            if (isYawAndThrustRightAnalog()) {
+                horizontalDirection = Math.abs(pan) > Math.abs(tilt);
+                if (horizontalDirection) {
+                    tilt = 0.0f;
+                } else {
+                    pan = 0.0f;
+                }
+            }
+            if (isRightAnalogFullTravelThrust() && !horizontalDirection) {
                 tilt = (tilt + 1.0f) / 2.0f;
             }
             mControls.setRightAnalogY(tilt);
@@ -118,7 +129,16 @@ public class TouchController extends AbstractController {
 
         @Override
         public void OnMoved(float pan, float tilt) {
-            if (isLeftAnalogFullTravelThrust()) {
+            boolean horizontalDirection = false;
+            if (isYawAndThrustLeftAnalog()) {
+                horizontalDirection = Math.abs(pan) > Math.abs(tilt);
+                if (horizontalDirection) {
+                    tilt = 0.0f;
+                } else {
+                    pan = 0.0f;
+                }
+            }
+            if (isLeftAnalogFullTravelThrust() && !horizontalDirection) {
                 tilt = (tilt + 1.0f) / 2.0f;
             }
             mControls.setLeftAnalogY(tilt);
@@ -143,6 +163,19 @@ public class TouchController extends AbstractController {
 
     public boolean isThrustRightAnalog() {
         return (mControls.getMode() == 1 || mControls.getMode() == 3);
+    }
+
+    /**
+     * In modes where yaw and thrust share one touch joystick, accept only a
+     * cardinal direction. A diagonal gesture is snapped to its dominant axis
+     * so the pilot cannot change throttle and yaw at the same time.
+     */
+    private boolean isYawAndThrustLeftAnalog() {
+        return mControls.getMode() == 2;
+    }
+
+    private boolean isYawAndThrustRightAnalog() {
+        return mControls.getMode() == 3;
     }
 
     public boolean isLeftAnalogFullTravelThrust() {

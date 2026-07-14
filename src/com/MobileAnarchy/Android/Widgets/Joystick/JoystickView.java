@@ -83,6 +83,7 @@ public class JoystickView extends View {
 
     private boolean verticalLocked = false;
     private boolean horizontalLocked = false;
+    private boolean cardinalDirectionsOnly = false;
 
     // =========================================
     // Constructors
@@ -346,6 +347,17 @@ public class JoystickView extends View {
             float y = ev.getY(pointerIndex);
             touchY = verticalLocked ? 0 : y - circleCenterY;
 
+            // Snap the handle to the dominant axis. This makes the visible
+            // joystick and the reported values agree on one of four cardinal
+            // directions instead of allowing diagonal input.
+            if (cardinalDirectionsOnly) {
+                if (Math.abs(touchX) > Math.abs(touchY)) {
+                    touchY = 0.0f;
+                } else {
+                    touchX = 0.0f;
+                }
+            }
+
             // Log.d(TAG, String.format("ACTION_MOVE: (%03.0f, %03.0f) => (%03.0f, %03.0f)", x, y, touchX, touchY));
             reportOnMoved();
             invalidate();
@@ -475,5 +487,13 @@ public class JoystickView extends View {
 
     public boolean isHorizontalLocked() {
         return horizontalLocked;
+    }
+
+    public void setCardinalDirectionsOnly(boolean enabled) {
+        cardinalDirectionsOnly = enabled;
+    }
+
+    public boolean isCardinalDirectionsOnly() {
+        return cardinalDirectionsOnly;
     }
 }
