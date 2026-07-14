@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ESP-Drone</title>
+  <link rel="stylesheet" href="/web.css">
+</head>
+<body>
+  <main id="mainScreen" class="android-main">
+    <header class="main-header">
+      <div class="telemetry-header">
+        <img src="/android-res/battery" alt="Pin"><span id="batteryText">0%</span>
+        <img src="/android-res/wifi" alt="Chất lượng liên kết"><span id="linkQuality">N/A</span>
+      </div>
+      <div class="main-menu">
+        <button id="connectButton" class="image-button" title="Kết nối / Ngắt kết nối"><img src="/android-res/connect" alt="Kết nối"></button>
+        <button id="settingsButton" class="image-button" title="Cài đặt"><img src="/android-res/settings" alt="Cài đặt"></button>
+      </div>
+    </header>
+
+    <nav class="uav-action-bar">
+      <button data-action="flight">FLIGHT</button><button data-action="arm">ARM</button><button class="kill" data-action="kill">KILL</button><button data-action="takeoff">TAKEOFF</button><button data-action="land">LAND</button>
+    </nav>
+
+    <section class="flight-data" aria-label="FlightDataView">
+      <span>P:</span><output id="pitch">0</output><span>R:</span><output id="roll">0</output><span>T:</span><output id="thrust">0%</output><span>Y:</span><output id="yaw">0</output>
+    </section>
+
+    <section id="uavStatus" class="uav-status">Thiết bị: CHƯA SẴN SÀNG
+Kết nối: Chưa kết nối
+ARM: Chưa bật
+Độ cao: ? m | Mục tiêu: ? m
+Chế độ cao: Chưa rõ</section>
+
+    <section class="joystick-column left-column">
+      <button id="leftHorizontalLock" class="image-button joystick-lock" title="Khóa ngang joystick trái"><img src="/android-res/horizontal" alt="Khóa ngang"></button>
+      <div id="leftJoystick" class="joystick" aria-label="Joystick trái"></div>
+    </section>
+    <pre id="console" class="console">Đang chờ kết nối...</pre>
+    <section class="joystick-column right-column"><div id="rightJoystick" class="joystick right" aria-label="Joystick phải"></div></section>
+  </main>
+
+  <main id="preferencesScreen" class="preferences hidden">
+    <header class="preferences-toolbar"><button id="backButton" title="Quay lại">‹</button><h1>Cài đặt điều khiển UAV</h1></header>
+    <section id="preferenceList" class="preference-list">
+      <button data-section="connection"><b>Kết nối Wi-Fi ESP32</b><small>IP của ESP32 trong mạng Wi-Fi dùng chung</small></button>
+      <button data-section="flight"><b>Cài đặt điều khiển bay</b><small>Chế độ, deadzone, trim và giới hạn điều khiển</small></button>
+      <button data-section="controller"><b>Cài đặt bộ điều khiển</b><small>Joystick cảm ứng và các trục điều khiển</small></button>
+      <button data-section="app"><b>Cài đặt ứng dụng</b><small>Khóa xoay màn hình và console kỹ thuật</small></button>
+      <button id="aboutButton"><b>Dự án gốc</b><small>ESP-Drone Android based on Crazyflie Android client</small></button>
+    </section>
+    <form id="settingsForm" class="settings-form hidden">
+      <h2 id="settingsTitle"></h2><div id="settingsFields"></div>
+      <footer><button type="button" id="cancelSettings">HỦY</button><button type="submit">LƯU</button></footer>
+    </form>
+  </main>
+
+  <dialog id="aboutDialog"><h2>Dự án gốc</h2><p>ESPDrone Android APP based on crazyflie-android-client is licensed under the GNU General Public License V2.</p><button>OK</button></dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
