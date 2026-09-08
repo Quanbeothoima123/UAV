@@ -136,35 +136,36 @@
             android:src="@drawable/ic_action_settings_light" />
     </LinearLayout>
 
-    <!-- Top Right: 3 Telemetry Bar Charts (Roll, Pitch, Altm) -->
+    <!-- Top: 3 Telemetry Cards (Altm, Roll, Pitch) centered between left controls and right icons -->
     <LinearLayout
         android:id="@+id/top_telemetry_group"
-        android:layout_width="wrap_content"
-        android:layout_height="56dp"
+        android:layout_width="match_parent"
+        android:layout_height="58dp"
         android:layout_alignParentTop="true"
+        android:layout_toEndOf="@+id/top_left_controls"
+        android:layout_toRightOf="@+id/top_left_controls"
         android:layout_toStartOf="@+id/top_right_icons"
         android:layout_toLeftOf="@+id/top_right_icons"
-        android:layout_marginEnd="10dp"
-        android:layout_marginRight="10dp"
+        android:gravity="center"
         android:orientation="horizontal">
 
         <se.bitcraze.crazyfliecontrol2.TelemetryBarView
-            android:id="@+id/telemetry_roll"
-            android:layout_width="85dp"
+            android:id="@+id/telemetry_altm"
+            android:layout_width="92dp"
             android:layout_height="match_parent"
-            android:layout_marginEnd="6dp"
-            android:layout_marginRight="6dp" />
+            android:layout_marginEnd="8dp"
+            android:layout_marginRight="8dp" />
+
+        <se.bitcraze.crazyfliecontrol2.TelemetryBarView
+            android:id="@+id/telemetry_roll"
+            android:layout_width="92dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="8dp"
+            android:layout_marginRight="8dp" />
 
         <se.bitcraze.crazyfliecontrol2.TelemetryBarView
             android:id="@+id/telemetry_pitch"
-            android:layout_width="85dp"
-            android:layout_height="match_parent"
-            android:layout_marginEnd="6dp"
-            android:layout_marginRight="6dp" />
-
-        <se.bitcraze.crazyfliecontrol2.TelemetryBarView
-            android:id="@+id/telemetry_altm"
-            android:layout_width="85dp"
+            android:layout_width="92dp"
             android:layout_height="match_parent" />
     </LinearLayout>
 
