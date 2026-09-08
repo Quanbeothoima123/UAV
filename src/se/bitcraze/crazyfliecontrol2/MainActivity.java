@@ -76,6 +76,21 @@ import android.view.KeyEvent;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.os.Handler;
+import android.preference.PreferenceManager;
+import android.provider.Settings;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
+import android.util.Log;
+import android.view.ContextMenu;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.MotionEvent;
 import android.view.View;
 import android.widget.AdapterView;
 import android.widget.Button;
@@ -96,6 +111,14 @@ public class MainActivity extends EspActivity {
     private JoystickView mJoystickViewRight;
     private FlightDataView mFlightDataView;
     private ImageButton mJoystickLeftHLock;
+
+    private CircularKnobView mCircularKnobView;
+    private Button mBtnDpadW, mBtnDpadA, mBtnDpadS, mBtnDpadD;
+    private TelemetryBarView mTelemetryRoll, mTelemetryPitch, mTelemetryAltm;
+    private BatteryGaugeView mBatteryGaugeView;
+    private Button mBtnFlight, mBtnArm, mBtnDisarm, mBtnKill, mBtnTakeoff, mBtnLanding;
+    private TextView mTextFlightSub;
+    private View mLayoutTakeoff, mLayoutLanding;
 
     private ScrollView mConsoleScrollView;
     private TextView mConsoleTextView;
@@ -131,58 +154,60 @@ public class MainActivity extends EspActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
         setContentView(R.layout.activity_main);
 
         mPresenter = new MainPresenter(this);
 
         setDefaultPreferenceValues();
 
-        mTextView_battery = (TextView) findViewById(R.id.battery_text);
-        mTextView_linkQuality = (TextView) findViewById(R.id.linkQuality_text);
-
-        setBatteryLevel(-1.0f);
-        setLinkQualityText("N/A");
-
         mControls = new Controls(this, mPreferences);
         mControls.setDefaultPreferenceValues(getResources());
 
-        //Default controller
-        mJoystickViewLeft = (JoystickView) findViewById(R.id.joystick_left);
-        mJoystickViewRight = (JoystickView) findViewById(R.id.joystick_right);
+        mJoystickViewLeft = new JoystickView(this);
+        mJoystickViewRight = new JoystickView(this);
         mJoystickViewRight.setLeft(false);
         mController = new TouchController(mControls, this, mJoystickViewLeft, mJoystickViewRight);
-        mJoystickLeftHLock = findViewById(R.id.joystick_left_hlock);
-        mJoystickLeftHLock.setOnClickListener(new View.OnClickListener(){
-            @Override
-            public void onClick(View v) {
-                boolean targetState = !mJoystickViewLeft.isHorizontalLocked();
-                mJoystickViewLeft.setHorizontalLocked(targetState);
-                mJoystickLeftHLock.setBackgroundResource(targetState ? R.drawable.custom_button :
-                        R.drawable.custom_button_seledted);
-            }
-        });
 
-        //initialize gamepad controller
         mGamepadController = new GamepadController(mControls, this, mPreferences);
         mGamepadController.setDefaultPreferenceValues(getResources());
 
-        //initialize buttons
-        mToggleConnectButton = (ImageButton) findViewById(R.id.imageButton_connect);
-        initializeMenuButtons();
+        mCircularKnobView = (CircularKnobView) findViewById(R.id.circular_knob_view);
+        mBtnDpadW = (Button) findViewById(R.id.btn_dpad_w);
+        mBtnDpadA = (Button) findViewById(R.id.btn_dpad_a);
+        mBtnDpadS = (Button) findViewById(R.id.btn_dpad_s);
+        mBtnDpadD = (Button) findViewById(R.id.btn_dpad_d);
 
-        mFlightDataView = (FlightDataView) findViewById(R.id.flightdataview);
+        mTelemetryRoll = (TelemetryBarView) findViewById(R.id.telemetry_roll);
+        mTelemetryPitch = (TelemetryBarView) findViewById(R.id.telemetry_pitch);
+        mTelemetryAltm = (TelemetryBarView) findViewById(R.id.telemetry_altm);
+        mBatteryGaugeView = (BatteryGaugeView) findViewById(R.id.battery_gauge_view);
+
+        mBtnFlight = (Button) findViewById(R.id.button_flight);
+        mTextFlightSub = (TextView) findViewById(R.id.text_flight_sub);
+        mBtnArm = (Button) findViewById(R.id.button_arm);
+        mBtnDisarm = (Button) findViewById(R.id.button_disarm);
+        mBtnKill = (Button) findViewById(R.id.button_kill);
+        mBtnTakeoff = (Button) findViewById(R.id.button_takeoff);
+        mBtnLanding = (Button) findViewById(R.id.button_landing);
+        mLayoutTakeoff = findViewById(R.id.layout_takeoff);
+        mLayoutLanding = findViewById(R.id.layout_landing);
+        mLandButton = mBtnLanding;
+
+        if (mTelemetryRoll != null) mTelemetryRoll.configure("Roll", "°", -30f, 30f);
+        if (mTelemetryPitch != null) mTelemetryPitch.configure("Pitch", "°", -30f, 30f);
+        if (mTelemetryAltm != null) mTelemetryAltm.configure("Altm", "m", 0f, 2.0f);
 
         mConsoleScrollView = (ScrollView) findViewById(R.id.console_scrollView);
         mConsoleTextView = (TextView) findViewById(R.id.console_textView);
         mUavStatusText = (TextView) findViewById(R.id.uav_status_text);
-        registerForContextMenu(mConsoleTextView);
+        if (mConsoleTextView != null) {
+            registerForContextMenu(mConsoleTextView);
+        }
 
-        //action buttons
-        mFlightModeButton = (Button) findViewById(R.id.button_flight_mode);
-        mRingEffectButton = (Button) findViewById(R.id.button_ledRing);
-        mHeadlightButton = (Button) findViewById(R.id.button_headLight);
-        mBuzzerSoundButton = (Button) findViewById(R.id.button_buzzerSound);
-        mLandButton = (Button) findViewById(R.id.button_land);
+        mToggleConnectButton = (ImageButton) findViewById(R.id.imageButton_connect);
+        initializeMenuButtons();
+        initializeNewUiListeners();
 
         IntentFilter filter = new IntentFilter();
         filter.addAction(this.getPackageName()+".USB_PERMISSION");
@@ -192,12 +217,140 @@ public class MainActivity extends EspActivity {
 
         initializeSounds();
 
+        setBatteryLevel(-1.0f);
+        setLinkQualityText("N/A");
         setCacheDir();
+    }
+
+    private void initializeNewUiListeners() {
+        if (mCircularKnobView != null) {
+            mCircularKnobView.setOnKnobMoveListener(new CircularKnobView.OnKnobMoveListener() {
+                @Override
+                public void onMoved(float roll, float pitch) {
+                    if (mPresenter != null) {
+                        mPresenter.setPilotRP(roll, pitch);
+                    }
+                    if (mTelemetryRoll != null) mTelemetryRoll.setValue(roll);
+                    if (mTelemetryPitch != null) mTelemetryPitch.setValue(pitch);
+                }
+            });
+        }
+
+        if (mBtnDpadW != null) {
+            mBtnDpadW.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (mPresenter != null) {
+                        mPresenter.stepThrottle(1);
+                    }
+                }
+            });
+        }
+
+        if (mBtnDpadS != null) {
+            mBtnDpadS.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (mPresenter != null) {
+                        mPresenter.stepThrottle(-1);
+                    }
+                }
+            });
+        }
+
+        if (mBtnDpadA != null) {
+            mBtnDpadA.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v, MotionEvent event) {
+                    if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                        if (mPresenter != null) mPresenter.setPilotYaw(90.0f);
+                        return true;
+                    } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                        if (mPresenter != null) mPresenter.setPilotYaw(0.0f);
+                        return true;
+                    }
+                    return false;
+                }
+            });
+        }
+
+        if (mBtnDpadD != null) {
+            mBtnDpadD.setOnTouchListener(new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View v, MotionEvent event) {
+                    if (event.getAction() == MotionEvent.ACTION_DOWN) {
+                        if (mPresenter != null) mPresenter.setPilotYaw(-90.0f);
+                        return true;
+                    } else if (event.getAction() == MotionEvent.ACTION_UP || event.getAction() == MotionEvent.ACTION_CANCEL) {
+                        if (mPresenter != null) mPresenter.setPilotYaw(0.0f);
+                        return true;
+                    }
+                    return false;
+                }
+            });
+        }
+
+        if (mBtnFlight != null) {
+            mBtnFlight.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (mPresenter != null) {
+                        mPresenter.enableFlightMode();
+                    }
+                }
+            });
+        }
+
+        if (mBtnArm != null) {
+            mBtnArm.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    armUav(v);
+                }
+            });
+        }
+
+        if (mBtnDisarm != null) {
+            mBtnDisarm.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    if (mPresenter != null) {
+                        mPresenter.disarmUav();
+                    }
+                }
+            });
+        }
+
+        if (mBtnKill != null) {
+            mBtnKill.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    killUav(v);
+                }
+            });
+        }
+
+        View.OnClickListener takeoffListener = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                takeoffUav(v);
+            }
+        };
+        if (mBtnTakeoff != null) mBtnTakeoff.setOnClickListener(takeoffListener);
+        if (mLayoutTakeoff != null) mLayoutTakeoff.setOnClickListener(takeoffListener);
+
+        View.OnClickListener landingListener = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                landUav(v);
+            }
+        };
+        if (mBtnLanding != null) mBtnLanding.setOnClickListener(landingListener);
+        if (mLayoutLanding != null) mLayoutLanding.setOnClickListener(landingListener);
     }
 
     private void initializeSounds() {
         this.setVolumeControlStream(AudioManager.STREAM_MUSIC);
-        // Load sounds
         mSoundPool = new SoundPool(10, AudioManager.STREAM_MUSIC, 0);
         mSoundPool.setOnLoadCompleteListener(new OnLoadCompleteListener() {
             @Override
@@ -229,9 +382,7 @@ public class MainActivity extends EspActivity {
     }
 
     private void setDefaultPreferenceValues(){
-        // Set default preference values
         PreferenceManager.setDefaultValues(this, R.xml.preferences, false);
-        // Initialize preferences
         mPreferences = PreferenceManager.getDefaultSharedPreferences(this);
 
         mRadioChannelDefaultValue = getString(R.string.preferences_radio_channel_defaultValue);
@@ -415,25 +566,26 @@ public class MainActivity extends EspActivity {
     @Override
     public void onResume() {
         super.onResume();
-        //TODO: improve
         PreferencesActivity.setDefaultJoystickSize(this);
-        mJoystickViewLeft.setPreferences(mPreferences);
-        mJoystickViewRight.setPreferences(mPreferences);
+        if (mJoystickViewLeft != null) {
+            mJoystickViewLeft.setPreferences(mPreferences);
+        }
+        if (mJoystickViewRight != null) {
+            mJoystickViewRight.setPreferences(mPreferences);
+        }
         mControls.setControlConfig();
         mGamepadController.setControlConfig();
         resetInputMethod();
         checkScreenLock();
         checkConsole();
-        //disable action buttons
-        mFlightModeButton.setEnabled(false);
-        mRingEffectButton.setEnabled(false);
-        mHeadlightButton.setEnabled(false);
-        mBuzzerSoundButton.setEnabled(false);
-        mLandButton.setEnabled(false);
+        setEnabledIfPresent(mFlightModeButton, false);
+        setEnabledIfPresent(mRingEffectButton, false);
+        setEnabledIfPresent(mHeadlightButton, false);
+        setEnabledIfPresent(mBuzzerSoundButton, false);
+        setEnabledIfPresent(mLandButton, false);
         if (mPreferences.getBoolean(PreferencesActivity.KEY_PREF_IMMERSIVE_MODE_BOOL, false)) {
             setHideyBar();
         }
-        //mJoystickViewLeft.requestLayout();
     }
 
     @Override
@@ -546,8 +698,10 @@ public class MainActivity extends EspActivity {
     public void updateFlightData(){
         // Show the same signed P/R/Y values that the UDP controller sends to
         // the current Python-compatible firmware.
-        mFlightDataView.updateFlightData(-mController.getPitch(), -mController.getRoll(),
-                mController.getThrust(), -mController.getYaw());
+        if (mFlightDataView != null && mController != null) {
+            mFlightDataView.updateFlightData(-mController.getPitch(), -mController.getRoll(),
+                    mController.getThrust(), -mController.getYaw());
+        }
     }
 
     public void appendToConsole(String text) {
@@ -775,7 +929,12 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mTextView_battery.setText(format(R.string.battery_text, fBatteryPercentage));
+                if (mTextView_battery != null) {
+                    mTextView_battery.setText(format(R.string.battery_text, fBatteryPercentage));
+                }
+                if (mBatteryGaugeView != null) {
+                    mBatteryGaugeView.setBattery(battery, fBatteryPercentage);
+                }
             }
         });
     }
@@ -784,7 +943,32 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mTextView_linkQuality.setText(format(R.string.linkQuality_text, quality));
+                if (mTextView_linkQuality != null) {
+                    mTextView_linkQuality.setText(format(R.string.linkQuality_text, quality));
+                }
+            }
+        });
+    }
+
+    public void updateTelemetryDisplay(final float roll, final float pitch, final float altitude, final float battery) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mTelemetryRoll != null) {
+                    mTelemetryRoll.setValue(roll);
+                }
+                if (mTelemetryPitch != null) {
+                    mTelemetryPitch.setValue(pitch);
+                }
+                if (mTelemetryAltm != null) {
+                    mTelemetryAltm.setValue(altitude);
+                }
+                if (mBatteryGaugeView != null) {
+                    float normalizedBattery = battery - 3.0f;
+                    int batteryPercentage = (int) (normalizedBattery * 100);
+                    batteryPercentage = Math.max(0, Math.min(100, batteryPercentage));
+                    mBatteryGaugeView.setBattery(battery, batteryPercentage);
+                }
             }
         });
     }
@@ -827,7 +1011,7 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mBuzzerSoundButton.setEnabled(enabled);
+                setEnabledIfPresent(mBuzzerSoundButton, enabled);
             }
         });
     }
@@ -836,7 +1020,7 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mRingEffectButton.setEnabled(enabled);
+                setEnabledIfPresent(mRingEffectButton, enabled);
             }
         });
     }
@@ -845,7 +1029,7 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mHeadlightButton.setEnabled(enabled);
+                setEnabledIfPresent(mHeadlightButton, enabled);
             }
         });
     }
@@ -854,7 +1038,9 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mHeadlightButton.setTextColor(toggle ? Color.parseColor("#00AA00") : Color.BLACK);
+                if (mHeadlightButton != null) {
+                    mHeadlightButton.setTextColor(toggle ? Color.parseColor("#00AA00") : Color.BLACK);
+                }
             }
         });
     }
@@ -876,11 +1062,29 @@ public class MainActivity extends EspActivity {
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                mFlightModeButton.setEnabled(enabled);
-                mRingEffectButton.setEnabled(enabled);
-                mHeadlightButton.setEnabled(enabled);
-                mBuzzerSoundButton.setEnabled(enabled);
-                mLandButton.setEnabled(enabled);
+                setEnabledIfPresent(mFlightModeButton, enabled);
+                setEnabledIfPresent(mRingEffectButton, enabled);
+                setEnabledIfPresent(mHeadlightButton, enabled);
+                setEnabledIfPresent(mBuzzerSoundButton, enabled);
+                setEnabledIfPresent(mLandButton, enabled);
+                setEnabledIfPresent(mBtnFlight, enabled);
+                setEnabledIfPresent(mBtnArm, enabled);
+                setEnabledIfPresent(mBtnDisarm, enabled);
+                setEnabledIfPresent(mBtnTakeoff, enabled);
+                setEnabledIfPresent(mBtnLanding, enabled);
+                setEnabledIfPresent(mBtnKill, enabled);
+            }
+        });
+    }
+
+    public void setFlightModeState(final boolean enabled) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (mTextFlightSub != null) {
+                    mTextFlightSub.setText(enabled ? "Flight: BẬT" : "Flight (f)");
+                    mTextFlightSub.setTextColor(enabled ? Color.parseColor("#00C853") : Color.parseColor("#0277BD"));
+                }
             }
         });
     }
@@ -895,6 +1099,19 @@ public class MainActivity extends EspActivity {
         if (mFlightModeButton != null) {
             mFlightModeButton.setEnabled(false);
         }
+        setEnabledIfPresent(mBtnFlight, false);
+        setEnabledIfPresent(mBtnArm, false);
+        setEnabledIfPresent(mBtnDisarm, false);
+        setEnabledIfPresent(mBtnTakeoff, false);
+        setEnabledIfPresent(mBtnLanding, false);
+        setEnabledIfPresent(mBtnKill, false);
         setBatteryLevel(-1.0f);
+        setFlightModeState(false);
+    }
+
+    private void setEnabledIfPresent(View view, boolean enabled) {
+        if (view != null) {
+            view.setEnabled(enabled);
+        }
     }
 }

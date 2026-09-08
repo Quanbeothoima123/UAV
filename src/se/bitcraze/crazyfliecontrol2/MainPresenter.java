@@ -37,16 +37,17 @@ public class MainPresenter {
     // The vertical Y/T stick adjusts the altitude target, not raw throttle.
     // At 100% deflection it changes at most 5 cm every 0.5 second.
     private static final long UAV_ALTITUDE_REPEAT_MS = 500L;
-    private static final float UAV_ALTITUDE_STEP_METERS = 0.05f;
-    private static final float UAV_ALTITUDE_MIN_METERS = 0.0f;
-    private static final float UAV_ALTITUDE_MAX_METERS = 2.0f;
+    private static final float UAV_ALTITUDE_STEP_METERS = 0.10f;
+    private static final float UAV_ALTITUDE_MIN_METERS = 0.10f;
+    private static final float UAV_ALTITUDE_MAX_METERS = 3.0f;
 
-    // Defaults from the current Python Auto-brake panel.
-    private static final float UAV_BRAKE_K = 0.9f;
-    private static final float UAV_BRAKE_RATIO = 0.8f;
-    private static final long UAV_BRAKE_MIN_MS = 100L;
-    private static final long UAV_BRAKE_MAX_MS = 1000L;
-    private static final float UAV_AXIS_ACTIVE_EPSILON = 0.01f;
+    // Khớp với uav_udp_console 2.py (k=0.0, ratio=0.0): Tắt phanh giật ngược khi buông tay
+    // để tránh hiện tượng rung lắc/chao đảo (PIO), để vòng lặp PID của ESP32 tự cân bằng mượt mà
+    private static final float UAV_BRAKE_K = 0.0f;
+    private static final float UAV_BRAKE_RATIO = 0.0f;
+    private static final long UAV_BRAKE_MIN_MS = 0L;
+    private static final long UAV_BRAKE_MAX_MS = 0L;
+    private static final float UAV_AXIS_ACTIVE_EPSILON = 0.05f;
 
     private static final Pattern STATUS_ARM = Pattern.compile("(?:^|\\s)ARM=(\\d+)");
     private static final Pattern STATUS_THR = Pattern.compile("(?:^|\\s)THR=(-?\\d+)");
@@ -61,6 +62,54 @@ public class MainPresenter {
     private static final Pattern STATUS_MOTORS = Pattern.compile(
             "M\\s*=\\s*(-?\\d+) (-?\\d+) (-?\\d+) (-?\\d+)");
     private static final Pattern ALT_TARGET_REPLY = Pattern.compile("ALT TGT=([-\\d.]+)");
+    private static final Pattern STATUS_RPY = Pattern.compile("R=([-\\d.]+)\\s+P=([-\\d.]+)(?:\\s+Y=([-\\d.]+))?");
+    private static final Pattern STATUS_BATV = Pattern.compile("BATV=([-\\d.]+)");
+    private static final Pattern STATUS_ARMREJ = Pattern.compile("ARMREJ=(\\d+)");
+    private static final Pattern STATUS_TKOREJ = Pattern.compile("TKOREJ=(\\d+)");
+    private static final Pattern STATUS_TKOAB = Pattern.compile("TKOAB=(\\d+)");
+    private static final Pattern STATUS_TKOP = Pattern.compile("TKOP=(\\d+)");
+
+    public static final String[] ARM_REJECT_NAMES = {
+        "",
+        "Chưa Calib Accel -> Cần calib accel & gyro",
+        "FSM không ở DISARMED -> Bấm KILL rồi ARM lại",
+        "Attitude chưa hợp lệ (Mahony chưa init) -> Để yên drone vài giây",
+        "Nghiêng quá ngưỡng -> Đặt drone bằng phẳng",
+        "IMU stale/không khỏe -> Kiểm tra bus I2C & dây",
+        "Gyro calib chưa pass -> Giữ yên drone",
+        "Accel chưa calib 6 mặt -> Cần calib accel",
+        "Không đọc được điện áp pin (ADC lỗi)",
+        "PIN DƯỚI SÀN -> Cần sạc pin trước khi bay!",
+        "Baro chưa có mốc 0m -> Cần calib baro",
+        "Baro unhealthy (nhiễu áp suất) -> Tránh gió/quạt",
+        "Alt estimator chưa hợp lệ",
+        "Vòng điều khiển trễ hạn liên tục",
+        "Không mượn được I2C để calib baro",
+        "Calib baro lúc ARM thất bại",
+        "HEARTBEAT quá hạn (>1000ms) -> Mất kết nối",
+        "Chưa đủ mẫu pin để chốt ga hover",
+        "PIN QUÁ THẤP (<3.4V) -> Cần sạc pin ngay!",
+        "MPU6050 config không hợp lệ",
+        "Gyro corrected mean còn lệch -> Giữ yên drone",
+        "Chưa có cửa sổ gyro đứng yên 1s trước ARM"
+    };
+
+    public static final String[] TAKEOFF_REJECT_NAMES = {
+        "",
+        "FSM không ở ARMED -> Bấm ARM trước",
+        "ToF không init được (không thấy chip I2C)",
+        "Alt estimator không hợp lệ -> ARM lại để reset",
+        "Lỗi cất cánh"
+    };
+
+    public static final String[] TAKEOFF_ABORT_NAMES = {
+        "",
+        "TIMEOUT (chuỗi cất cánh bị kẹt)",
+        "Mất hết ToF và Baro",
+        "Nghiêng sắp lật",
+        "Chưa kích hoạt cất cánh",
+        "Kẹt: Không nhấc nổi (ga kịch trần) -> Kiểm tra cánh quạt/pin"
+    };
 
     private MainActivity mainActivity;
 
@@ -68,6 +117,7 @@ public class MainPresenter {
     private CrtpDriver mDriver;
     private UavUdpLink mUavUdpLink;
     private volatile boolean mUavUdpConnecting;
+
 
     private Logg mLogg;
     private LogConfig mDefaultLogConfig = null;
@@ -87,6 +137,7 @@ public class MainPresenter {
     private ConsoleListener mConsoleListener;
     private volatile float mUavAltitudeTarget = Float.NaN;
     private volatile boolean mUavAutoBraking;
+    private volatile long mLastStatusReceivedTime = 0L;
 
     private static class UavBrakeAxis {
         private int heldSign;
@@ -151,8 +202,9 @@ public class MainPresenter {
         @Override
         public void onConnected(String host, int port) {
             mUavUdpConnecting = false;
-            mUavAltitudeTarget = Float.NaN;
+            mUavAltitudeTarget = 1.0f;
             mUavAutoBraking = false;
+            mLastStatusReceivedTime = 0L;
             if (mainActivity == null) {
                 return;
             }
@@ -164,6 +216,10 @@ public class MainPresenter {
                     "Thiết bị: ĐANG CHỜ DỮ LIỆU\n"
                             + "Kết nối: Đã kết nối UDP tới " + host + ":" + port,
                     false);
+            // Gửi ngay lệnh 'f' để kích hoạt Flight Mode & bật streaming telemetry STATUS
+            sendUavCommand("f");
+            // Đặt target độ cao cất cánh lên 1.00m (thoát vùng ground effect)
+            sendUavCommand("@ALT TGT 1.00");
             startUavControlThread();
             requestUavConfigurationSnapshot();
         }
@@ -378,6 +434,32 @@ public class MainPresenter {
         mSendJoystickDataThread.start();
     }
 
+    private volatile float mPilotRoll = 0.0f;
+    private volatile float mPilotPitch = 0.0f;
+    private volatile float mPilotYaw = 0.0f;
+
+    public void setPilotRollPitch(float roll, float pitch) {
+        mPilotRoll = roll;
+        mPilotPitch = pitch;
+    }
+
+    public void setPilotYaw(float yaw) {
+        mPilotYaw = yaw;
+    }
+
+    public void stepThrottle(int sign) {
+        if (Float.isNaN(mUavAltitudeTarget)) {
+            mUavAltitudeTarget = 1.0f;
+        }
+        float newTarget = Math.max(UAV_ALTITUDE_MIN_METERS,
+                Math.min(UAV_ALTITUDE_MAX_METERS, mUavAltitudeTarget + sign * UAV_ALTITUDE_STEP_METERS));
+        mUavAltitudeTarget = newTarget;
+        sendUavCommand(String.format(Locale.US, "@ALT TGT %.2f", newTarget));
+        if (mainActivity != null) {
+            mainActivity.showToastie(String.format(Locale.US, "Độ cao mục tiêu: %.2fm", newTarget));
+        }
+    }
+
     /**
      * Send the same text control protocol as uav_udp_console.py.
      * Roll/pitch signs follow the Python manual-control convention:
@@ -394,22 +476,40 @@ public class MainPresenter {
                 float lastYaw = Float.NaN;
                 long lastSetpointTime = 0L;
                 long lastAltitudeCommandTime = 0L;
+                long lastStatusWatchdogCheck = 0L;
+                long lastCommanderHeartbeatTime = 0L;
                 UavBrakeAxis rollBrake = new UavBrakeAxis();
                 UavBrakeAxis pitchBrake = new UavBrakeAxis();
                 int heldYawSign = 0;
 
                 while (mainActivity != null && mUavUdpLink != null && mUavUdpLink.isConnected()) {
+                    float pilotRoll = mPilotRoll;
+                    float pilotPitch = mPilotPitch;
+                    float yaw = mPilotYaw;
+
                     IController controller = mainActivity.getController();
-                    if (controller == null) {
-                        break;
+                    if (controller != null && pilotRoll == 0f && pilotPitch == 0f && yaw == 0f) {
+                        pilotRoll = -controller.getRoll();
+                        pilotPitch = -controller.getPitch();
+                        yaw = -controller.getYaw();
+                    }
+                    long now = System.currentTimeMillis();
+
+                    // Commander Watchdog Heartbeat ('p'): ESP32 firmware commander có watchdog 1000ms.
+                    // Nếu không gửi 'p' mỗi 400ms thì Commander sẽ bị SOFT FAULT -> LANDING ngay khi drone vào HOLDING/FLYING.
+                    if (now - lastCommanderHeartbeatTime >= 400L) {
+                        sendUavCommand("p");
+                        lastCommanderHeartbeatTime = now;
                     }
 
-                    float pilotRoll = -controller.getRoll();
-                    float pilotPitch = -controller.getPitch();
-                    // Current Python mapping: turn left is positive yaw-rate,
-                    // turn right is negative.
-                    float yaw = -controller.getYaw();
-                    long now = System.currentTimeMillis();
+                    // Tự động duy trì STATUS streaming: nếu quá 2000ms chưa nhận được gói STATUS,
+                    // tự động gửi lại lệnh 'f' để kích hoạt stream dữ liệu cảm biến
+                    if (now - lastStatusWatchdogCheck >= 1500L) {
+                        lastStatusWatchdogCheck = now;
+                        if (now - mLastStatusReceivedTime >= 2000L) {
+                            sendUavCommand("f");
+                        }
+                    }
 
                     boolean yawActive = Math.abs(yaw) >= UAV_AXIS_ACTIVE_EPSILON;
                     int yawSign = yawActive ? (yaw > 0.0f ? 1 : -1) : 0;
@@ -417,27 +517,29 @@ public class MainPresenter {
                     boolean newDirectionalInput = rollBrake.isNewPilotInput(pilotRoll)
                             || pitchBrake.isNewPilotInput(pilotPitch)
                             || newYawInput;
-                    // Python rule 1: any newly pressed direction cancels every
-                    // brake that is currently running; the pilot always wins.
                     if (newDirectionalInput) {
                         rollBrake.cancelBrake();
                         pitchBrake.cancelBrake();
                     }
                     heldYawSign = yawSign;
 
-                    // Python limits TILT step to 1..10 degrees. Keep the same
-                    // guard even if legacy Android advanced settings are higher.
-                    float tiltStep = Math.max(1.0f, Math.min(10.0f,
-                            mainActivity.getControls().getRollPitchFactor()));
+                    // Max tilt step 4.0 degrees as requested by user
+                    float tiltStep = 4.0f;
                     float roll = rollBrake.update(pilotRoll, now, tiltStep);
                     float pitch = pitchBrake.update(pilotPitch, now, tiltStep);
                     mUavAutoBraking = rollBrake.isBraking(now) || pitchBrake.isBraking(now);
 
-                    boolean changed = Float.isNaN(lastRoll)
-                            || Math.abs(roll - lastRoll) >= 0.01f
-                            || Math.abs(pitch - lastPitch) >= 0.01f
-                            || Math.abs(yaw - lastYaw) >= 0.01f;
-                    if (changed || now - lastSetpointTime >= 1000L) {
+                    // Stream tối ưu chống nghẽn WiFi ESP32 (khớp logic Python BUG 2):
+                    // Gửi tức thì khi có thay đổi góc lái (10Hz).
+                    // Khi giữ nguyên góc / buông tay: chỉ gửi keepalive chu kỳ 200ms (5Hz)
+                    // để không bao giờ bị stale 400ms mà không làm quá tải CPU/WiFi của ESP32.
+                    boolean changed = (Float.isNaN(lastRoll)
+                            || Math.abs(roll - lastRoll) >= 0.04f
+                            || Math.abs(pitch - lastPitch) >= 0.04f
+                            || Math.abs(yaw - lastYaw) >= 1.0f);
+                    boolean keepaliveNeeded = (now - lastSetpointTime >= 200L);
+
+                    if (changed || keepaliveNeeded) {
                         sendUavCommand(String.format(Locale.US, "@SP SET %.2f %.2f %.2f", roll, pitch, yaw));
                         lastRoll = roll;
                         lastPitch = pitch;
@@ -504,6 +606,19 @@ public class MainPresenter {
             return false;
         }
 
+        if (line.startsWith("FLIGHT MODE ON")) {
+            if (mainActivity != null) {
+                mainActivity.setFlightModeState(true);
+            }
+            return false;
+        }
+        if (line.startsWith("FLIGHT MODE OFF")) {
+            if (mainActivity != null) {
+                mainActivity.setFlightModeState(false);
+            }
+            return false;
+        }
+
         Matcher targetReply = ALT_TARGET_REPLY.matcher(line);
         if (targetReply.find()) {
             mUavAltitudeTarget = parseFloat(targetReply.group(1), mUavAltitudeTarget);
@@ -512,6 +627,11 @@ public class MainPresenter {
         Matcher armMatcher = STATUS_ARM.matcher(line);
         if (!armMatcher.find()) {
             return false;
+        }
+
+        mLastStatusReceivedTime = System.currentTimeMillis();
+        if (mainActivity != null) {
+            mainActivity.setFlightModeState(true);
         }
 
         String armed = armMatcher.group(1);
@@ -526,6 +646,51 @@ public class MainPresenter {
         String tofError = findValue(STATUS_TERR, line, null);
         String motors = findMotorValues(line);
 
+        // Roll, Pitch, Yaw
+        Matcher rpyMatcher = STATUS_RPY.matcher(line);
+        float rollVal = 0.0f;
+        float pitchVal = 0.0f;
+        float yawVal = 0.0f;
+        if (rpyMatcher.find()) {
+            rollVal = parseFloat(rpyMatcher.group(1), 0.0f);
+            pitchVal = parseFloat(rpyMatcher.group(2), 0.0f);
+            if (rpyMatcher.group(3) != null) {
+                yawVal = parseFloat(rpyMatcher.group(3), 0.0f);
+            }
+        }
+
+        // Battery Voltage BATV
+        Matcher batvMatcher = STATUS_BATV.matcher(line);
+        float batv = -1.0f;
+        if (batvMatcher.find()) {
+            batv = parseFloat(batvMatcher.group(1), -1.0f);
+        }
+
+        // Rejection codes
+        Matcher armRejMatcher = STATUS_ARMREJ.matcher(line);
+        int armRej = 0;
+        if (armRejMatcher.find()) {
+            try {
+                armRej = Integer.parseInt(armRejMatcher.group(1));
+            } catch (NumberFormatException ignored) {}
+        }
+
+        Matcher tkoRejMatcher = STATUS_TKOREJ.matcher(line);
+        int tkoRej = 0;
+        if (tkoRejMatcher.find()) {
+            try {
+                tkoRej = Integer.parseInt(tkoRejMatcher.group(1));
+            } catch (NumberFormatException ignored) {}
+        }
+
+        Matcher tkoAbMatcher = STATUS_TKOAB.matcher(line);
+        int tkoAb = 0;
+        if (tkoAbMatcher.find()) {
+            try {
+                tkoAb = Integer.parseInt(tkoAbMatcher.group(1));
+            } catch (NumberFormatException ignored) {}
+        }
+
         if (target != null) {
             mUavAltitudeTarget = parseFloat(target, mUavAltitudeTarget);
         }
@@ -537,19 +702,27 @@ public class MainPresenter {
                 && (tofError == null || "0".equals(tofError)));
         boolean ready = attitudeReady && altitudeReady;
 
-        String status = "Thiết bị: " + (ready ? "SẴN SÀNG" : "CHƯA SẴN SÀNG")
-                + "\nKết nối: UDP | ARM: " + ("1".equals(armed) ? "Đã bật" : "Chưa bật")
-                + " | Ga firmware: " + throttle
-                + "\nCân bằng: " + (attitudeReady ? "Tốt" : "Chưa hợp lệ")
-                + " | Cảm biến cao: " + (altitudeReady ? "Sẵn sàng" : "Có lỗi")
-                + "\nĐộ cao: " + altitude + " m | Mục tiêu: "
-                + (target == null ? "?" : target) + " m | Vận tốc: " + verticalSpeed + " m/s"
-                + "\nChế độ cao: " + altitudeModeName(mode)
-                + " | Motor: " + motors
-                + "\nPhanh ngang: " + (mUavAutoBraking ? "ĐANG PHANH" : "Sẵn sàng")
-                + " | Cần cao: 0,5 giây/nhịp, tối đa 5 cm";
+        StringBuilder sb = new StringBuilder();
+        sb.append("Thiết bị: ").append(ready ? "SẴN SÀNG" : "CHƯA SẴN SÀNG");
+        sb.append(" | ARM: ").append("1".equals(armed) ? "ĐÃ BẬT" : "CHƯA BẬT");
+        if (batv > 0) {
+            sb.append(String.format(Locale.US, " | Pin: %.2fV", batv));
+        }
+        sb.append("\nĐộ cao: ").append(altitude).append("m | TGT: ")
+          .append(target == null ? "?" : target).append("m | Vz: ").append(verticalSpeed).append("m/s");
+        sb.append(" | Motor: ").append(motors);
+
+        if (armRej > 0 && armRej < ARM_REJECT_NAMES.length) {
+            sb.append("\n⚠ CẢNH BÁO ARM: ").append(ARM_REJECT_NAMES[armRej]);
+        } else if (tkoRej > 0 && tkoRej < TAKEOFF_REJECT_NAMES.length) {
+            sb.append("\n⚠ CẢNH BÁO CẤT CÁNH: ").append(TAKEOFF_REJECT_NAMES[tkoRej]);
+        } else if (tkoAb > 0 && tkoAb < TAKEOFF_ABORT_NAMES.length) {
+            sb.append("\n⚠ HỦY CẤT CÁNH: ").append(TAKEOFF_ABORT_NAMES[tkoAb]);
+        }
+
         if (mainActivity != null) {
-            mainActivity.updateUavStatus(status, ready);
+            mainActivity.updateUavStatus(sb.toString(), ready);
+            mainActivity.updateTelemetryDisplay(rollVal, pitchVal, parseFloat(altitude, 0f), batv);
         }
         return true;
     }
@@ -598,10 +771,10 @@ public class MainPresenter {
             @Override
             public void run() {
                 String[] commands = {
-                        "@PID GET", "@MAH GET", "@SP GET", "@TRIM GET",
+                        "f", "@ALT TGT 1.00", "@PID GET", "@MAH GET", "@SP GET", "@TRIM GET",
                         "@ALT GET", "@TKO GET", "@LAND GET"
                 };
-                long[] delaysMs = {300L, 100L, 100L, 50L, 50L, 100L, 100L};
+                long[] delaysMs = {150L, 100L, 200L, 100L, 100L, 50L, 50L, 100L, 100L};
                 for (int i = 0; i < commands.length; i++) {
                     try {
                         Thread.sleep(delaysMs[i]);
@@ -759,13 +932,22 @@ public class MainPresenter {
     }
 
     public void armUav() {
-        // Python ARM sends only 'r'. Entering flight mode ('f') remains a
-        // separate explicit action via the FLIGHT button.
         sendUavCommand("r");
+    }
+
+    public void disarmUav() {
+        sendUavCommand("d");
     }
 
     public void enterFlightModeUav() {
         sendUavCommand("f");
+    }
+
+    public void enableFlightMode() {
+        sendUavCommand("f");
+        if (mainActivity != null) {
+            mainActivity.showToastie("Đã gửi Flight ('f') - Kích hoạt dữ liệu cảm biến");
+        }
     }
 
     public void killUav() {
@@ -773,11 +955,22 @@ public class MainPresenter {
     }
 
     public void takeoffUav() {
-        sendUavCommand("@ALT TAKEOFF");
+        sendUavCommand("@ALT TAKEOFF 1.00");
+        if (mainActivity != null) {
+            mainActivity.showToastie("Cất cánh lên 1.0m (@ALT TAKEOFF 1.00)");
+        }
     }
 
     public void landUav() {
         sendUavCommand("l");
+    }
+
+    public void holdAltUav() {
+        sendUavCommand("z");
+    }
+
+    public void setPilotRP(float roll, float pitch) {
+        setPilotRollPitch(roll, pitch);
     }
 
     public void enableAltHoldMode(boolean hover) {

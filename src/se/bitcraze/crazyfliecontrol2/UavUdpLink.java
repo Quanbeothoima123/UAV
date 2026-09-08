@@ -24,6 +24,7 @@ public class UavUdpLink {
     private static final int RECEIVE_BUFFER_SIZE = 4096;
     private static final int RECEIVE_TIMEOUT_MS = 500;
     private static final int KEEPALIVE_INTERVAL_MS = 5000;
+    private static final int HEARTBEAT_INTERVAL_MS = 400;
     private static final Charset UTF_8 = Charset.forName("UTF-8");
     private static final byte[] STOP_SENDER = new byte[0];
 
@@ -46,6 +47,7 @@ public class UavUdpLink {
     private volatile int mDevicePort;
     private Thread mReceiveThread;
     private Thread mKeepaliveThread;
+    private Thread mHeartbeatThread;
     private Thread mSendThread;
 
     public UavUdpLink(Listener listener) {
@@ -104,6 +106,14 @@ public class UavUdpLink {
         }, "uav-udp-keepalive");
         mKeepaliveThread.start();
 
+        mHeartbeatThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                heartbeatLoop();
+            }
+        }, "uav-udp-heartbeat");
+        mHeartbeatThread.start();
+
         // Same initial packet as UavUdpConsole.start(): allocate a local source
         // port and allow the ESP32 firmware to learn the phone as its peer.
         enqueue(new byte[]{'\n'});
@@ -140,6 +150,9 @@ public class UavUdpLink {
 
         if (mKeepaliveThread != null) {
             mKeepaliveThread.interrupt();
+        }
+        if (mHeartbeatThread != null) {
+            mHeartbeatThread.interrupt();
         }
         if (mSendThread != null) {
             mSendQueue.offer(STOP_SENDER);
@@ -193,6 +206,7 @@ public class UavUdpLink {
 
         mReceiveThread = null;
         mKeepaliveThread = null;
+        mHeartbeatThread = null;
         mSendThread = null;
         mSendQueue.clear();
 
@@ -268,6 +282,20 @@ public class UavUdpLink {
             }
         }
         Log.d(TAG, "Keepalive thread stopped");
+    }
+
+    private void heartbeatLoop() {
+        while (mRunning && !Thread.currentThread().isInterrupted()) {
+            try {
+                Thread.sleep(HEARTBEAT_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                break;
+            }
+            if (mRunning) {
+                enqueue("p\n".getBytes(UTF_8));
+            }
+        }
+        Log.d(TAG, "Heartbeat thread stopped");
     }
 
     private void notifyMessage(String line) {
