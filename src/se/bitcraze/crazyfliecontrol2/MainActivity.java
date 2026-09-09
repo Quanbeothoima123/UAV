@@ -153,7 +153,8 @@ public class MainActivity extends EspActivity {
     private MainPresenter mPresenter;
 
     private CameraStreamView mCameraStreamView;
-    private ImageButton mBtnCamera;
+    private Button mBtnConnectCam;
+    private Button mBtnDisconnectCam;
     private CameraStreamWorker mCameraWorker;
     private boolean mCameraStreaming = false;
 
@@ -212,7 +213,8 @@ public class MainActivity extends EspActivity {
         }
 
         mCameraStreamView = (CameraStreamView) findViewById(R.id.camera_stream_view);
-        mBtnCamera = (ImageButton) findViewById(R.id.imageButton_camera);
+        mBtnConnectCam = (Button) findViewById(R.id.button_connect_cam);
+        mBtnDisconnectCam = (Button) findViewById(R.id.button_disconnect_cam);
         mToggleConnectButton = (ImageButton) findViewById(R.id.imageButton_connect);
         initializeMenuButtons();
         initializeNewUiListeners();
@@ -443,14 +445,75 @@ public class MainActivity extends EspActivity {
             }
         });
 
-        if (mBtnCamera != null) {
-            mBtnCamera.setOnClickListener(new View.OnClickListener() {
+        if (mBtnConnectCam != null) {
+            mBtnConnectCam.setOnClickListener(new View.OnClickListener() {
                 @Override
                 public void onClick(View v) {
-                    toggleCameraStream();
+                    startCameraStream(getEffectiveUavHost());
                 }
             });
         }
+        if (mBtnDisconnectCam != null) {
+            mBtnDisconnectCam.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    stopCameraStream();
+                    Toast.makeText(MainActivity.this, "Đã ngắt kết nối Camera", Toast.LENGTH_SHORT).show();
+                }
+            });
+        }
+    }
+
+    public void bindToWifiNetworkIfPossible() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                for (android.net.Network network : cm.getAllNetworks()) {
+                    android.net.NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+                    if (capabilities != null && capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) {
+                        cm.bindProcessToNetwork(network);
+                        Log.i(LOG_TAG, "Đã bind process tới mạng Wi-Fi");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    public String getEffectiveUavHost() {
+        android.net.wifi.WifiManager wifiManager = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifiManager != null) {
+            android.net.DhcpInfo dhcpInfo = wifiManager.getDhcpInfo();
+            if (dhcpInfo != null && dhcpInfo.gateway != 0) {
+                int gw = dhcpInfo.gateway;
+                String gatewayIp = (gw & 0xFF) + "." +
+                                   ((gw >> 8) & 0xFF) + "." +
+                                   ((gw >> 16) & 0xFF) + "." +
+                                   ((gw >> 24) & 0xFF);
+                if (gatewayIp.startsWith("192.168.4.") || "192.168.4.1".equals(gatewayIp)) {
+                    Log.i(LOG_TAG, "Tự động phát hiện mạng ESP SoftAP, host = " + gatewayIp);
+                    return gatewayIp;
+                }
+            }
+
+            android.net.wifi.WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+            if (wifiInfo != null) {
+                int ip = wifiInfo.getIpAddress();
+                if (ip != 0) {
+                    String phoneIp = (ip & 0xFF) + "." +
+                                     ((ip >> 8) & 0xFF) + "." +
+                                     ((ip >> 16) & 0xFF) + "." +
+                                     ((ip >> 24) & 0xFF);
+                    if (phoneIp.startsWith("192.168.4.")) {
+                        Log.i(LOG_TAG, "Điện thoại ở dải 192.168.4.x, ESP IP = 192.168.4.1");
+                        return "192.168.4.1";
+                    }
+                }
+            }
+        }
+
+        String defaultHost = getString(R.string.preferences_udp_host_defaultValue);
+        return mPreferences.getString(PreferencesActivity.KEY_PREF_UDP_HOST, defaultHost).trim();
     }
 
     public void toggleCameraStream() {
@@ -458,13 +521,20 @@ public class MainActivity extends EspActivity {
             stopCameraStream();
             Toast.makeText(this, "Đã ngắt camera", Toast.LENGTH_SHORT).show();
         } else {
-            startCameraStream();
+            startCameraStream(getEffectiveUavHost());
         }
     }
 
     public void startCameraStream() {
-        String defaultHost = getString(R.string.preferences_udp_host_defaultValue);
-        String host = mPreferences.getString(PreferencesActivity.KEY_PREF_UDP_HOST, defaultHost).trim();
+        startCameraStream(getEffectiveUavHost());
+    }
+
+    public void startCameraStream(String targetHost) {
+        bindToWifiNetworkIfPossible();
+        if (targetHost == null || targetHost.isEmpty()) {
+            targetHost = getEffectiveUavHost();
+        }
+        final String host = targetHost;
         String streamUrl = "http://" + host + ":8080/stream";
 
         stopCameraStream();
@@ -480,24 +550,18 @@ public class MainActivity extends EspActivity {
                     public void run() {
                         if (CameraStreamWorker.STATE_STREAMING.equals(state)) {
                             mCameraStreaming = true;
-                            if (mBtnCamera != null) {
-                                mBtnCamera.setSelected(true);
-                            }
                         } else if (CameraStreamWorker.STATE_CONNECTING.equals(state)) {
                             if (mCameraStreamView != null) {
-                                mCameraStreamView.setStatus("Đang kết nối camera...", false);
+                                mCameraStreamView.setStatus("Đang kết nối " + host + ":8080...", false);
                             }
                         } else if (CameraStreamWorker.STATE_RECONNECTING.equals(state)) {
                             if (mCameraStreamView != null) {
-                                mCameraStreamView.setStatus("Đang thử lại...", false);
+                                mCameraStreamView.setStatus("Đang thử lại (" + host + ":8080)...", false);
                             }
                         } else {
                             mCameraStreaming = false;
                             if (mCameraStreamView != null) {
                                 mCameraStreamView.setStatus("CAM SẴN SÀNG", false);
-                            }
-                            if (mBtnCamera != null) {
-                                mBtnCamera.setSelected(false);
                             }
                         }
                     }
@@ -526,9 +590,6 @@ public class MainActivity extends EspActivity {
 
         mCameraWorker.start();
         mCameraStreaming = true;
-        if (mBtnCamera != null) {
-            mBtnCamera.setSelected(true);
-        }
     }
 
     public void stopCameraStream() {
@@ -536,9 +597,6 @@ public class MainActivity extends EspActivity {
         if (mCameraWorker != null) {
             mCameraWorker.stop();
             mCameraWorker = null;
-        }
-        if (mBtnCamera != null) {
-            mBtnCamera.setSelected(false);
         }
         if (mCameraStreamView != null) {
             mCameraStreamView.setStatus("CAM TẮT", false);
@@ -585,17 +643,16 @@ public class MainActivity extends EspActivity {
     }
 
     private void connectUDP() {
-        ConnectivityManager connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-        NetworkInfo activeNetwork = connectivityManager == null ? null : connectivityManager.getActiveNetworkInfo();
-        if (activeNetwork == null || !activeNetwork.isConnected()
-                || activeNetwork.getType() != ConnectivityManager.TYPE_WIFI) {
-            Toast.makeText(this, "Connect this phone to the same Wi-Fi as the ESP32 first.", Toast.LENGTH_LONG).show();
+        bindToWifiNetworkIfPossible();
+
+        android.net.wifi.WifiManager wifiManager = (android.net.wifi.WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifiManager != null && !wifiManager.isWifiEnabled()) {
+            Toast.makeText(this, "Vui lòng bật Wi-Fi và kết nối với UAV trước.", Toast.LENGTH_LONG).show();
             return;
         }
 
-        String defaultHost = getString(R.string.preferences_udp_host_defaultValue);
+        String host = getEffectiveUavHost();
         String defaultPort = getString(R.string.preferences_udp_port_defaultValue);
-        String host = mPreferences.getString(PreferencesActivity.KEY_PREF_UDP_HOST, defaultHost).trim();
         String portValue = mPreferences.getString(PreferencesActivity.KEY_PREF_UDP_PORT, defaultPort).trim();
         try {
             int port = Integer.parseInt(portValue);
@@ -605,6 +662,8 @@ public class MainActivity extends EspActivity {
                         Toast.LENGTH_LONG).show();
             }
             mPresenter.connectUDP(host, port);
+            // Tự động kết nối camera ngay khi kết nối UAV!
+            startCameraStream(host);
         } catch (NumberFormatException e) {
             Toast.makeText(this, "Invalid ESP32 UDP port: " + portValue, Toast.LENGTH_LONG).show();
         }
