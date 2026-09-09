@@ -116,6 +116,17 @@
         android:gravity="center_vertical">
 
         <ImageButton
+            android:id="@+id/imageButton_camera"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@drawable/custom_button"
+            android:contentDescription="Bật/Tắt Camera"
+            android:elevation="2dp"
+            android:src="@drawable/ic_action_camera"
+            android:layout_marginEnd="6dp"
+            android:layout_marginRight="6dp" />
+
+        <ImageButton
             android:id="@+id/imageButton_connect"
             android:layout_width="40dp"
             android:layout_height="40dp"
@@ -330,7 +341,7 @@
     </LinearLayout>
 
     <!-- ================================================================= -->
-    <!-- CENTER COLUMN: TAKEOFF, LANDING, BATTERY GAUGE                    -->
+    <!-- CENTER COLUMN: TAKEOFF/LANDING COMPACT ROW + CAMERA STREAM FEED   -->
     <!-- ================================================================= -->
     <LinearLayout
         android:id="@+id/center_column"
@@ -341,71 +352,96 @@
         android:orientation="vertical"
         android:gravity="center_horizontal">
 
-        <!-- Takeoff circular button -->
+        <!-- Compact Takeoff & Landing row (Vietnamese only) -->
         <LinearLayout
-            android:id="@+id/layout_takeoff"
+            android:id="@+id/takeoff_landing_row"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginBottom="12dp">
+            android:layout_marginBottom="6dp">
 
-            <androidx.appcompat.widget.AppCompatButton
-                android:id="@+id/button_takeoff"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:background="@drawable/btn_takeoff_bg"
-                android:text="⇧"
-                android:textColor="#0277BD"
-                android:textSize="20sp"
-                android:textStyle="bold" />
-
-            <TextView
+            <!-- Takeoff button -->
+            <LinearLayout
+                android:id="@+id/layout_takeoff"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Cất cánh (Take off)"
-                android:textColor="#01579B"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:layout_marginStart="8dp"
-                android:layout_marginLeft="8dp" />
-        </LinearLayout>
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginEnd="16dp"
+                android:layout_marginRight="16dp">
 
-        <!-- Landing circular button -->
-        <LinearLayout
-            android:id="@+id/layout_landing"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="14dp">
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/button_takeoff"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:background="@drawable/btn_takeoff_bg"
+                    android:text="⇧"
+                    android:textColor="#0277BD"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
 
-            <androidx.appcompat.widget.AppCompatButton
-                android:id="@+id/button_landing"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:background="@drawable/btn_landing_bg"
-                android:text="⇩"
-                android:textColor="#263238"
-                android:textSize="20sp"
-                android:textStyle="bold" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Cất cánh"
+                    android:textColor="#01579B"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:layout_marginStart="6dp"
+                    android:layout_marginLeft="6dp" />
+            </LinearLayout>
 
-            <TextView
+            <!-- Landing button -->
+            <LinearLayout
+                android:id="@+id/layout_landing"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Hạ cánh (Landing)"
-                android:textColor="#263238"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:layout_marginStart="8dp"
-                android:layout_marginLeft="8dp" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <androidx.appcompat.widget.AppCompatButton
+                    android:id="@+id/button_landing"
+                    android:layout_width="38dp"
+                    android:layout_height="38dp"
+                    android:background="@drawable/btn_landing_bg"
+                    android:text="⇩"
+                    android:textColor="#263238"
+                    android:textSize="18sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Hạ cánh"
+                    android:textColor="#263238"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:layout_marginStart="6dp"
+                    android:layout_marginLeft="6dp" />
+            </LinearLayout>
         </LinearLayout>
 
-        <!-- Large Battery Gauge -->
-        <se.bitcraze.crazyfliecontrol2.BatteryGaugeView
-            android:id="@+id/battery_gauge_view"
-            android:layout_width="160dp"
-            android:layout_height="64dp" />
+        <!-- Camera Stream View right in center -->
+        <se.bitcraze.crazyfliecontrol2.CameraStreamView
+            android:id="@+id/camera_stream_view"
+            android:layout_width="260dp"
+            android:layout_height="180dp" />
+
     </LinearLayout>
+
+    <!-- ================================================================= -->
+    <!-- BOTTOM-LEFT CORNER: BATTERY GAUGE (Moved from center)             -->
+    <!-- ================================================================= -->
+    <se.bitcraze.crazyfliecontrol2.BatteryGaugeView
+        android:id="@+id/battery_gauge_view"
+        android:layout_width="140dp"
+        android:layout_height="52dp"
+        android:layout_alignParentStart="true"
+        android:layout_alignParentLeft="true"
+        android:layout_above="@+id/bottom_status_bar"
+        android:layout_marginStart="14dp"
+        android:layout_marginLeft="14dp"
+        android:layout_marginBottom="4dp" />
 
 </RelativeLayout>

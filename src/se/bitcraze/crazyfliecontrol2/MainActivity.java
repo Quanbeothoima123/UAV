@@ -52,6 +52,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
@@ -151,6 +152,11 @@ public class MainActivity extends EspActivity {
     private TextView mTextView_linkQuality;
     private MainPresenter mPresenter;
 
+    private CameraStreamView mCameraStreamView;
+    private ImageButton mBtnCamera;
+    private CameraStreamWorker mCameraWorker;
+    private boolean mCameraStreaming = false;
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -205,6 +211,8 @@ public class MainActivity extends EspActivity {
             registerForContextMenu(mConsoleTextView);
         }
 
+        mCameraStreamView = (CameraStreamView) findViewById(R.id.camera_stream_view);
+        mBtnCamera = (ImageButton) findViewById(R.id.imageButton_camera);
         mToggleConnectButton = (ImageButton) findViewById(R.id.imageButton_connect);
         initializeMenuButtons();
         initializeNewUiListeners();
@@ -434,6 +442,107 @@ public class MainActivity extends EspActivity {
               startActivity(intent);
             }
         });
+
+        if (mBtnCamera != null) {
+            mBtnCamera.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    toggleCameraStream();
+                }
+            });
+        }
+    }
+
+    public void toggleCameraStream() {
+        if (mCameraStreaming) {
+            stopCameraStream();
+            Toast.makeText(this, "Đã ngắt camera", Toast.LENGTH_SHORT).show();
+        } else {
+            startCameraStream();
+        }
+    }
+
+    public void startCameraStream() {
+        String defaultHost = getString(R.string.preferences_udp_host_defaultValue);
+        String host = mPreferences.getString(PreferencesActivity.KEY_PREF_UDP_HOST, defaultHost).trim();
+        String streamUrl = "http://" + host + ":8080/stream";
+
+        stopCameraStream();
+        if (mCameraStreamView != null) {
+            mCameraStreamView.setStatus("Đang kết nối: " + host + ":8080...", false);
+        }
+
+        mCameraWorker = new CameraStreamWorker(streamUrl, new CameraStreamWorker.Listener() {
+            @Override
+            public void onStateChanged(final String state) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (CameraStreamWorker.STATE_STREAMING.equals(state)) {
+                            mCameraStreaming = true;
+                            if (mBtnCamera != null) {
+                                mBtnCamera.setSelected(true);
+                            }
+                        } else if (CameraStreamWorker.STATE_CONNECTING.equals(state)) {
+                            if (mCameraStreamView != null) {
+                                mCameraStreamView.setStatus("Đang kết nối camera...", false);
+                            }
+                        } else if (CameraStreamWorker.STATE_RECONNECTING.equals(state)) {
+                            if (mCameraStreamView != null) {
+                                mCameraStreamView.setStatus("Đang thử lại...", false);
+                            }
+                        } else {
+                            mCameraStreaming = false;
+                            if (mCameraStreamView != null) {
+                                mCameraStreamView.setStatus("CAM SẴN SÀNG", false);
+                            }
+                            if (mBtnCamera != null) {
+                                mBtnCamera.setSelected(false);
+                            }
+                        }
+                    }
+                });
+            }
+
+            @Override
+            public void onFrame(final Bitmap bitmap, final float fps) {
+                if (mCameraStreamView != null) {
+                    mCameraStreamView.updateFrame(bitmap, fps);
+                }
+            }
+
+            @Override
+            public void onError(final String message) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (mCameraStreamView != null && !mCameraStreaming) {
+                            mCameraStreamView.setStatus(message != null ? message : "Lỗi camera", false);
+                        }
+                    }
+                });
+            }
+        });
+
+        mCameraWorker.start();
+        mCameraStreaming = true;
+        if (mBtnCamera != null) {
+            mBtnCamera.setSelected(true);
+        }
+    }
+
+    public void stopCameraStream() {
+        mCameraStreaming = false;
+        if (mCameraWorker != null) {
+            mCameraWorker.stop();
+            mCameraWorker = null;
+        }
+        if (mBtnCamera != null) {
+            mBtnCamera.setSelected(false);
+        }
+        if (mCameraStreamView != null) {
+            mCameraStreamView.setStatus("CAM TẮT", false);
+        }
     }
 
     private void connectCrazyradio() {
@@ -610,6 +719,7 @@ public class MainActivity extends EspActivity {
     @Override
     protected void onDestroy() {
         Log.d(LOG_TAG, "onDestroy()");
+        stopCameraStream();
         unregisterReceiver(mUsbReceiver);
         mSoundPool.release();
         mSoundPool = null;
