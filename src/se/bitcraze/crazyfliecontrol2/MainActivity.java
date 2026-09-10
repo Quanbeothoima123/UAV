@@ -31,6 +31,8 @@ import java.io.File;
 import java.util.List;
 import java.util.Locale;
 
+import org.opencv.android.OpenCVLoader;
+
 import se.bitcraze.crazyflie.lib.crazyradio.Crazyradio;
 import se.bitcraze.crazyfliecontrol.controller.Controls;
 import se.bitcraze.crazyfliecontrol.controller.GamepadController;
@@ -155,12 +157,26 @@ public class MainActivity extends EspActivity {
     private CameraStreamView mCameraStreamView;
     private Button mBtnConnectCam;
     private Button mBtnDisconnectCam;
+    private Button mBtnToggleDetect;
     private CameraStreamWorker mCameraWorker;
     private boolean mCameraStreaming = false;
+    private boolean mDetectColorEnabled = false;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Khởi tạo OpenCV Native Library
+        if (!OpenCVLoader.initLocal()) {
+            Log.w(LOG_TAG, "OpenCVLoader.initLocal() không thành công, thử initDebug()...");
+            if (!OpenCVLoader.initDebug()) {
+                Log.e(LOG_TAG, "Không thể khởi tạo thư viện OpenCV!");
+            } else {
+                Log.i(LOG_TAG, "Khởi tạo OpenCV thành công (initDebug).");
+            }
+        } else {
+            Log.i(LOG_TAG, "Khởi tạo OpenCV thành công (initLocal).");
+        }
 
         setContentView(R.layout.activity_main);
 
@@ -215,6 +231,7 @@ public class MainActivity extends EspActivity {
         mCameraStreamView = (CameraStreamView) findViewById(R.id.camera_stream_view);
         mBtnConnectCam = (Button) findViewById(R.id.button_connect_cam);
         mBtnDisconnectCam = (Button) findViewById(R.id.button_disconnect_cam);
+        mBtnToggleDetect = (Button) findViewById(R.id.button_toggle_detect);
         mToggleConnectButton = (ImageButton) findViewById(R.id.imageButton_connect);
         initializeMenuButtons();
         initializeNewUiListeners();
@@ -462,6 +479,14 @@ public class MainActivity extends EspActivity {
                 }
             });
         }
+        if (mBtnToggleDetect != null) {
+            mBtnToggleDetect.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View v) {
+                    toggleColorDetection();
+                }
+            });
+        }
     }
 
     public void bindToWifiNetworkIfPossible() {
@@ -588,8 +613,32 @@ public class MainActivity extends EspActivity {
             }
         });
 
+        mCameraWorker.setDetectionEnabled(mDetectColorEnabled);
         mCameraWorker.start();
         mCameraStreaming = true;
+    }
+
+    private void toggleColorDetection() {
+        mDetectColorEnabled = !mDetectColorEnabled;
+        if (mCameraWorker != null) {
+            mCameraWorker.setDetectionEnabled(mDetectColorEnabled);
+        }
+        updateDetectButtonUI();
+        Toast.makeText(this, mDetectColorEnabled ? "Đã bật nhận diện màu (OpenCV)" : "Đã tắt nhận diện màu", Toast.LENGTH_SHORT).show();
+    }
+
+    private void updateDetectButtonUI() {
+        if (mBtnToggleDetect != null) {
+            if (mDetectColorEnabled) {
+                mBtnToggleDetect.setBackgroundResource(R.drawable.btn_detect_on_bg);
+                mBtnToggleDetect.setText("🔍 Nhận diện màu (OpenCV): BẬT ✓");
+                mBtnToggleDetect.setTextColor(Color.parseColor("#E0F7FA"));
+            } else {
+                mBtnToggleDetect.setBackgroundResource(R.drawable.btn_detect_off_bg);
+                mBtnToggleDetect.setText("🔍 Nhận diện màu (OpenCV): TẮT");
+                mBtnToggleDetect.setTextColor(Color.parseColor("#CFD8DC"));
+            }
+        }
     }
 
     public void stopCameraStream() {

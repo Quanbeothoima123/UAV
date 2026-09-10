@@ -449,6 +449,19 @@
                 android:textStyle="bold" />
         </LinearLayout>
 
+        <!-- OpenCV Color Detection Toggle Button -->
+        <androidx.appcompat.widget.AppCompatButton
+            android:id="@+id/button_toggle_detect"
+            android:layout_width="260dp"
+            android:layout_height="32dp"
+            android:background="@drawable/btn_detect_off_bg"
+            android:text="🔍 Nhận diện màu (OpenCV): TẮT"
+            android:textColor="#CFD8DC"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:layout_marginTop="4dp" />
+
+
     </LinearLayout>
 
     <!-- ================================================================= -->
