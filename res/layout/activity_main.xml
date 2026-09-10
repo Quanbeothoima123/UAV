@@ -9,16 +9,31 @@
     <!-- TOP ROW: ARM, DISARM, 3 TELEMETRY CHARTS (Roll, Pitch, Altm), CONNECT -->
     <!-- ================================================================= -->
 
-    <!-- Top Left: ARM & DISARM buttons -->
+    <!-- Top Left: Space reserved for future LOGO -->
     <LinearLayout
-        android:id="@+id/top_left_controls"
+        android:id="@+id/top_left_logo_area"
+        android:layout_width="100dp"
+        android:layout_height="65dp"
+        android:layout_alignParentStart="true"
+        android:layout_alignParentLeft="true"
+        android:layout_alignParentTop="true"
+        android:gravity="center"
+        android:orientation="vertical">
+        <!-- Chừa sẵn khoảng trống cho logo sau này -->
+    </LinearLayout>
+
+    <!-- Left Margin: FLIGHT, ARM, DISARM (Vertical stack) -->
+    <LinearLayout
+        android:id="@+id/left_vertical_controls"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_alignParentStart="true"
         android:layout_alignParentLeft="true"
-        android:layout_alignParentTop="true"
-        android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:layout_marginTop="75dp"
+        android:layout_marginStart="8dp"
+        android:layout_marginLeft="8dp"
+        android:orientation="vertical"
+        android:gravity="center_horizontal">
 
         <!-- FLIGHT Container (Kích hoạt Flight Mode & Stream cảm biến) -->
         <LinearLayout
@@ -26,18 +41,17 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center_horizontal"
-            android:layout_marginEnd="10dp"
-            android:layout_marginRight="10dp">
+            android:layout_marginBottom="8dp">
 
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/button_flight"
-                android:layout_width="90dp"
-                android:layout_height="40dp"
+                android:layout_width="82dp"
+                android:layout_height="36dp"
                 android:background="@drawable/btn_flight_bg"
                 android:text="FLIGHT"
                 android:textColor="#FFFFFF"
                 android:textStyle="bold"
-                android:textSize="14sp" />
+                android:textSize="13sp" />
 
             <TextView
                 android:id="@+id/text_flight_sub"
@@ -45,8 +59,8 @@
                 android:layout_height="wrap_content"
                 android:text="Flight (f)"
                 android:textColor="#0277BD"
-                android:textSize="11sp"
-                android:layout_marginTop="2dp" />
+                android:textSize="10sp"
+                android:layout_marginTop="1dp" />
         </LinearLayout>
 
         <!-- ARM Container -->
@@ -55,26 +69,25 @@
             android:layout_height="wrap_content"
             android:orientation="vertical"
             android:gravity="center_horizontal"
-            android:layout_marginEnd="10dp"
-            android:layout_marginRight="10dp">
+            android:layout_marginBottom="8dp">
 
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/button_arm"
-                android:layout_width="90dp"
-                android:layout_height="40dp"
+                android:layout_width="82dp"
+                android:layout_height="36dp"
                 android:background="@drawable/btn_arm_bg"
                 android:text="ARM"
                 android:textColor="#FFFFFF"
                 android:textStyle="bold"
-                android:textSize="14sp" />
+                android:textSize="13sp" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Arm (Khởi động)"
                 android:textColor="#2E7D32"
-                android:textSize="11sp"
-                android:layout_marginTop="2dp" />
+                android:textSize="10sp"
+                android:layout_marginTop="1dp" />
         </LinearLayout>
 
         <!-- DISARM Container -->
@@ -86,21 +99,21 @@
 
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/button_disarm"
-                android:layout_width="90dp"
-                android:layout_height="40dp"
+                android:layout_width="82dp"
+                android:layout_height="36dp"
                 android:background="@drawable/btn_disarm_bg"
                 android:text="DISARM"
                 android:textColor="#37474F"
                 android:textStyle="bold"
-                android:textSize="14sp" />
+                android:textSize="13sp" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Disarm (Chờ)"
                 android:textColor="#C67D00"
-                android:textSize="11sp"
-                android:layout_marginTop="2dp" />
+                android:textSize="10sp"
+                android:layout_marginTop="1dp" />
         </LinearLayout>
     </LinearLayout>
 
@@ -136,16 +149,14 @@
             android:src="@drawable/ic_action_settings_light" />
     </LinearLayout>
 
-    <!-- Top: 3 Telemetry Cards (Altm, Roll, Pitch) centered between left controls and right icons -->
+    <!-- Top: 3 Telemetry Cards (Altm, Roll, Pitch) centered at top -->
     <LinearLayout
         android:id="@+id/top_telemetry_group"
-        android:layout_width="match_parent"
+        android:layout_width="wrap_content"
         android:layout_height="58dp"
         android:layout_alignParentTop="true"
-        android:layout_toEndOf="@+id/top_left_controls"
-        android:layout_toRightOf="@+id/top_left_controls"
-        android:layout_toStartOf="@+id/top_right_icons"
-        android:layout_toLeftOf="@+id/top_right_icons"
+        android:layout_centerHorizontal="true"
+        android:layout_marginTop="6dp"
         android:gravity="center"
         android:orientation="horizontal">
 
@@ -216,8 +227,8 @@
         android:layout_alignParentStart="true"
         android:layout_alignParentLeft="true"
         android:layout_centerVertical="true"
-        android:layout_marginStart="80dp"
-        android:layout_marginLeft="80dp">
+        android:layout_marginStart="100dp"
+        android:layout_marginLeft="100dp">
 
         <!-- W (Up / Throttle+) -->
         <androidx.appcompat.widget.AppCompatButton
@@ -337,7 +348,8 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_centerHorizontal="true"
-        android:layout_centerVertical="true"
+        android:layout_below="@+id/top_telemetry_group"
+        android:layout_marginTop="10dp"
         android:orientation="vertical"
         android:gravity="center_horizontal">
 
@@ -415,7 +427,7 @@
         <se.bitcraze.crazyfliecontrol2.CameraStreamView
             android:id="@+id/camera_stream_view"
             android:layout_width="260dp"
-            android:layout_height="170dp" />
+            android:layout_height="160dp" />
 
         <!-- Cam Control Buttons (Connect Cam / Disconnect Cam) -->
         <LinearLayout
@@ -424,12 +436,12 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginTop="5dp">
+            android:layout_marginTop="6dp">
 
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/button_connect_cam"
                 android:layout_width="125dp"
-                android:layout_height="35dp"
+                android:layout_height="34dp"
                 android:background="@drawable/btn_flight_bg"
                 android:text="Connect Cam"
                 android:textColor="#FFFFFF"
@@ -441,7 +453,7 @@
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/button_disconnect_cam"
                 android:layout_width="125dp"
-                android:layout_height="35dp"
+                android:layout_height="34dp"
                 android:background="@drawable/btn_disarm_bg"
                 android:text="Disconnect Cam"
                 android:textColor="#37474F"
@@ -459,8 +471,7 @@
             android:textColor="#CFD8DC"
             android:textSize="11sp"
             android:textStyle="bold"
-            android:layout_marginTop="4dp" />
-
+            android:layout_marginTop="8dp" />
 
     </LinearLayout>
 
