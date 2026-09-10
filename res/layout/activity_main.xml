@@ -430,7 +430,7 @@
         <se.bitcraze.crazyfliecontrol2.CameraStreamView
             android:id="@+id/camera_stream_view"
             android:layout_width="260dp"
-            android:layout_height="160dp" />
+            android:layout_height="165dp" />
 
         <!-- Cam Control Buttons (Connect Cam / Disconnect Cam) -->
         <LinearLayout
@@ -439,12 +439,12 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:gravity="center_vertical"
-            android:layout_marginTop="6dp">
+            android:layout_marginTop="8dp">
 
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/button_connect_cam"
                 android:layout_width="125dp"
-                android:layout_height="34dp"
+                android:layout_height="35dp"
                 android:background="@drawable/btn_flight_bg"
                 android:text="Connect Cam"
                 android:textColor="#FFFFFF"
@@ -456,25 +456,13 @@
             <androidx.appcompat.widget.AppCompatButton
                 android:id="@+id/button_disconnect_cam"
                 android:layout_width="125dp"
-                android:layout_height="34dp"
+                android:layout_height="35dp"
                 android:background="@drawable/btn_disarm_bg"
                 android:text="Disconnect Cam"
                 android:textColor="#37474F"
                 android:textSize="12sp"
                 android:textStyle="bold" />
         </LinearLayout>
-
-        <!-- OpenCV Color Detection Toggle Button -->
-        <androidx.appcompat.widget.AppCompatButton
-            android:id="@+id/button_toggle_detect"
-            android:layout_width="260dp"
-            android:layout_height="32dp"
-            android:background="@drawable/btn_detect_off_bg"
-            android:text="🔍 Nhận diện màu (OpenCV): TẮT"
-            android:textColor="#CFD8DC"
-            android:textSize="11sp"
-            android:textStyle="bold"
-            android:layout_marginTop="8dp" />
 
     </LinearLayout>
 

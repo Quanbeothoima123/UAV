@@ -42,7 +42,7 @@ public class CameraStreamWorker {
     private final Listener mListener;
 
     private final ColorDetector mDetector = new ColorDetector();
-    private volatile boolean mDetectionEnabled = false;
+    private volatile boolean mDetectionEnabled = true;
 
     private volatile boolean mStop;
     private Thread mThread;
